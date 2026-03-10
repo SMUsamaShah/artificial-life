@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Artificial Life</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #111;
+      color: #eee;
+      font-family: 'Courier New', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px;
+      min-height: 100vh;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 4px; letter-spacing: 0.05em; }
+    .subtitle {
+      font-size: 0.78rem;
+      color: #777;
+      margin-bottom: 12px;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .subtitle a { color: #556; text-decoration: none; }
+    .subtitle a:hover { color: #888; }
+    #canvas {
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      max-width: min(100vw - 32px, 960px);
+      height: auto;
+      border: 1px solid #2a2a2a;
+    }
+    #stats {
+      font-size: 0.75rem;
+      color: #777;
+      margin: 8px 0 6px;
+      text-align: center;
+      height: 1.2em;
+    }
+    #controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      margin: 8px 0 10px;
+      align-items: center;
+      justify-content: center;
+    }
+    .ctrl-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.78rem;
+      color: #999;
+    }
+    button {
+      background: #222;
+      color: #ccc;
+      border: 1px solid #3a3a3a;
+      padding: 4px 11px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.78rem;
+      border-radius: 3px;
+    }
+    button:hover { background: #2e2e2e; border-color: #555; }
+    input[type=range] { width: 85px; cursor: pointer; accent-color: #556; }
+    input[type=number] {
+      width: 55px;
+      background: #1a1a1a;
+      color: #ccc;
+      border: 1px solid #333;
+      padding: 3px 5px;
+      font-family: inherit;
+      font-size: 0.78rem;
+      border-radius: 3px;
+    }
+    #legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 12px;
+      font-size: 0.72rem;
+      color: #666;
+      justify-content: center;
+      max-width: 640px;
+      margin-top: 4px;
+    }
+    .legend-item { display: flex; align-items: center; gap: 4px; }
+    .swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  </style>
+</head>
+<body>
+
+<h1>Artificial Life</h1>
+<p class="subtitle">
+  A 120&times;68 grid of self-modifying programs evolving through random interaction.<br>
+  Self-replicators spontaneously emerge and spread across the grid.<br>
+  <a href="https://arxiv.org/abs/2406.19108" target="_blank">Based on "Computational Life" (arxiv:2406.19108)</a>
+</p>
+
+<div id="stats">Initializing&hellip;</div>
+<canvas id="canvas"></canvas>
+
+<div id="controls">
+  <div class="ctrl-group">
+    <button id="btnPlay">&#9646;&#9646; Pause</button>
+    <button id="btnStep">Step</button>
+    <button id="btnReset">Reset</button>
+  </div>
+  <div class="ctrl-group">
+    <label>Speed:</label>
+    <input type="range" id="speedSlider" min="1" max="16" value="1">
+    <span id="speedVal">1&times;</span>
+  </div>
+  <div class="ctrl-group">
+    <label>Mutation:</label>
+    <input type="range" id="mutSlider" min="0" max="300" value="100">
+    <span id="mutVal">1.00&times;</span>
+  </div>
+  <div class="ctrl-group">
+    <label>Seed:</label>
+    <input type="number" id="seedInput" value="1" min="0" max="9999">
+  </div>
+</div>
+
+<div id="legend"></div>
+
+<script>
+'use strict';
+
+// ── Opcode constants (match Python: map(ord, "<>{}-+.,[]")) ──────────────────
+const LT     = 60;   // <   move data-head-0 left
+const GT     = 62;   // >   move data-head-0 right
+const LB     = 123;  // {   move data-head-1 left
+const RB     = 125;  // }   move data-head-1 right
+const MINUS  = 45;   // -   decrement tape[head0]
+const PLUS   = 43;   // +   increment tape[head0]
+const DOT    = 46;   // .   tape[head1] = tape[head0]
+const COMMA  = 44;   // ,   tape[head0] = tape[head1]
+const LBRACK = 91;   // [   if tape[head0]==0, jump forward past matching ]
+const RBRACK = 93;   // ]   if tape[head0]!=0, jump backward to matching [
+
+const OPCODE_TOKENS = [LT, GT, LB, RB, MINUS, PLUS, DOT, COMMA, LBRACK, RBRACK];
+const OPCODE_SET    = new Set(OPCODE_TOKENS);
+
+// Colour palette matching Python's build_color_lut()
+const PALETTE = new Map([
+  [LT,     [239,  71, 111]],
+  [GT,     [255, 209, 102]],
+  [LB,     [  6, 214, 160]],
+  [RB,     [ 17, 138, 178]],
+  [MINUS,  [255, 127,  80]],
+  [PLUS,   [131,  56, 236]],
+  [DOT,    [ 58, 134, 255]],
+  [COMMA,  [255, 190,  11]],
+  [LBRACK, [139, 201,  38]],
+  [RBRACK, [255,  89,  94]],
+]);
+const BG_COLOR = [20, 20, 20];
+
+// Flat 256×4 RGBA lookup: COLOR_LUT[val*4 .. val*4+3] = r,g,b,255
+const COLOR_LUT = new Uint8Array(256 * 4);
+for (let i = 0; i < 256; i++) {
+  const c = PALETTE.get(i) || BG_COLOR;
+  COLOR_LUT[i*4]   = c[0];
+  COLOR_LUT[i*4+1] = c[1];
+  COLOR_LUT[i*4+2] = c[2];
+  COLOR_LUT[i*4+3] = 255;
+}
+
+// ── Grid & simulation parameters ─────────────────────────────────────────────
+const GRID_W    = 120;
+const GRID_H    = 68;
+const N_PROG    = GRID_W * GRID_H;   // 8 160 programs
+const TAPE_SIZE = 64;                // bytes per program (= 8×8 pixels)
+const CELL      = 8;                 // pixels per tape cell dimension
+const MAX_ITER  = 8192;              // max brainfuck steps per pair (2^13, matches Python)
+const BASE_MUT  = 0.024 / 100.0;    // base background mutation rate
+
+const TEX_W = GRID_W * CELL;        // 960 px
+const TEX_H = GRID_H * CELL;        // 544 px
+
+// ── PRNG – Mulberry32 ────────────────────────────────────────────────────────
+function makePRNG(seed) {
+  let s = (seed ^ 0xDEADBEEF) >>> 0;
+
+  function next32() {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), s | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return (t ^ (t >>> 14)) >>> 0;
+  }
+
+  return {
+    /** Integer in [0, n) */
+    int(n)  { return next32() % n; },
+    /** Float in [0, 1) */
+    float() { return next32() / 4294967296; },
+    /** Fill Uint8Array with random bytes */
+    fill(arr) { for (let i = 0; i < arr.length; i++) arr[i] = next32() & 0xFF; },
+    /** Fisher-Yates shuffle of first n elements of Int32Array */
+    shuffle(arr, n) {
+      for (let i = n - 1; i > 0; i--) {
+        const j = next32() % (i + 1);
+        const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+      }
+    },
+  };
+}
+
+// ── Simulation state ─────────────────────────────────────────────────────────
+// programs[gx * GRID_H * TAPE_SIZE + gy * TAPE_SIZE + tape_idx]
+let programs = new Uint8Array(N_PROG * TAPE_SIZE);
+let epoch    = 0;
+let paused   = false;
+let mutRate  = BASE_MUT;
+let rng      = makePRNG(1);
+
+// Pre-allocated scratch buffers (avoid GC pressure in hot loop)
+const scratch   = new Uint8Array(TAPE_SIZE * 2);
+const order     = new Int32Array(N_PROG);
+const proposals = new Int32Array(N_PROG);
+const taken     = new Uint8Array(N_PROG);
+
+// ── Neighbourhood lookup (built once, matches Python's build_neighborhood) ───
+const neighbors      = new Int32Array(N_PROG * 24);  // max 24 in 5×5 window
+const neighborCounts = new Int32Array(N_PROG);
+
+(function buildNeighborhood() {
+  for (let x = 0; x < GRID_W; x++) {
+    const xLo = Math.max(0, x - 2), xHi = Math.min(GRID_W, x + 3);
+    for (let y = 0; y < GRID_H; y++) {
+      const yLo = Math.max(0, y - 2), yHi = Math.min(GRID_H, y + 3);
+      const idx = x * GRID_H + y;
+      let cnt = 0;
+      for (let nx = xLo; nx < xHi; nx++) {
+        for (let ny = yLo; ny < yHi; ny++) {
+          if (nx === x && ny === y) continue;
+          neighbors[idx * 24 + cnt++] = nx * GRID_H + ny;
+        }
+      }
+      neighborCounts[idx] = cnt;
+    }
+  }
+})();
+
+// ── Brainfuck interpreter (matches Python's run_tape) ────────────────────────
+// Operates on `tape` (length = TAPE_SIZE*2 = 128 when called from runEpoch).
+function runTape(tape, maxIter) {
+  const len = tape.length;
+  let pc = 0, h0 = 0, h1 = 0;
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    if (pc < 0 || pc >= len) break;
+    const op = tape[pc];
+
+    if (op === GT) {
+      h0 = (h0 + 1) % len;
+    } else if (op === LT) {
+      h0 = (h0 - 1 + len) % len;
+    } else if (op === RB) {
+      h1 = (h1 + 1) % len;
+    } else if (op === LB) {
+      h1 = (h1 - 1 + len) % len;
+    } else if (op === PLUS) {
+      tape[h0] = (tape[h0] + 1) & 0xFF;
+    } else if (op === MINUS) {
+      tape[h0] = (tape[h0] - 1 + 256) & 0xFF;
+    } else if (op === DOT) {
+      tape[h1] = tape[h0];
+    } else if (op === COMMA) {
+      tape[h0] = tape[h1];
+    } else if (op === LBRACK) {
+      if (tape[h0] === 0) {
+        let depth = 1, npc = pc + 1;
+        while (npc < len && depth > 0) {
+          if (tape[npc] === LBRACK) depth++;
+          else if (tape[npc] === RBRACK) depth--;
+          npc++;
+        }
+        if (depth !== 0) break; // unmatched bracket → halt
+        pc = npc - 1;
+      }
+    } else if (op === RBRACK) {
+      if (tape[h0] !== 0) {
+        let depth = 1, npc = pc - 1;
+        while (npc >= 0 && depth > 0) {
+          if (tape[npc] === RBRACK) depth++;
+          else if (tape[npc] === LBRACK) depth--;
+          npc--;
+        }
+        if (depth !== 0) break; // unmatched bracket → halt
+        pc = npc + 1;
+      }
+    }
+    pc++;
+  }
+}
+
+// ── One simulation epoch (matches Python's run_epochs inner loop) ─────────────
+function runEpoch() {
+  // 1. Build a random traversal order
+  for (let i = 0; i < N_PROG; i++) order[i] = i;
+  rng.shuffle(order, N_PROG);
+
+  // 2. Each cell proposes a random neighbour
+  for (let i = 0; i < N_PROG; i++) {
+    const nc = neighborCounts[i];
+    proposals[i] = nc > 0 ? neighbors[i * 24 + rng.int(nc)] : -1;
+  }
+
+  // 3. Select non-conflicting pairs (matches Python's select_pairs)
+  taken.fill(0);
+  for (let oi = 0; oi < N_PROG; oi++) {
+    const p = order[oi];
+    const n = proposals[p];
+    if (n < 0 || taken[p] || taken[n]) continue;
+    taken[p] = taken[n] = 1;
+
+    // Concatenate tapes, run interpreter, split back (matches run_epoch_pairs)
+    const pBase = p * TAPE_SIZE;
+    const nBase = n * TAPE_SIZE;
+    scratch.set(programs.subarray(pBase, pBase + TAPE_SIZE), 0);
+    scratch.set(programs.subarray(nBase, nBase + TAPE_SIZE), TAPE_SIZE);
+
+    runTape(scratch, MAX_ITER);
+
+    programs.set(scratch.subarray(0, TAPE_SIZE), pBase);
+    programs.set(scratch.subarray(TAPE_SIZE), nBase);
+  }
+
+  // 4. Background mutation (matches apply_background_mutation)
+  if (mutRate > 0) {
+    const total   = programs.length;
+    const numMuts = Math.round(total * mutRate);
+    for (let i = 0; i < numMuts; i++) {
+      programs[rng.int(total)] = rng.int(256);
+    }
+  }
+
+  epoch++;
+}
+
+// ── Stats helper ─────────────────────────────────────────────────────────────
+function opcodePercent() {
+  let n = 0;
+  for (let i = 0; i < programs.length; i++) if (OPCODE_SET.has(programs[i])) n++;
+  return 100 * n / programs.length;
+}
+
+// ── WebGL2 renderer ───────────────────────────────────────────────────────────
+const canvas = document.getElementById('canvas');
+canvas.width  = TEX_W;
+canvas.height = TEX_H;
+
+const gl = canvas.getContext('webgl2', { alpha: false });
+if (!gl) {
+  canvas.style.display = 'none';
+  document.body.insertAdjacentHTML('afterbegin',
+    '<p style="color:#f55;padding:2em;text-align:center">WebGL2 is required but not supported by this browser.</p>');
+  throw new Error('WebGL2 unavailable');
+}
+
+// Vertex shader: full-screen triangle strip
+const VS_SRC = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+// Fragment shader: sample RGBA texture directly
+const FS_SRC = `#version 300 es
+precision mediump float;
+uniform sampler2D u_tex;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  fragColor = texture(u_tex, v_uv);
+}`;
+
+function buildShader(type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
+    throw new Error('Shader error: ' + gl.getShaderInfoLog(sh));
+  return sh;
+}
+
+const glProg = gl.createProgram();
+gl.attachShader(glProg, buildShader(gl.VERTEX_SHADER, VS_SRC));
+gl.attachShader(glProg, buildShader(gl.FRAGMENT_SHADER, FS_SRC));
+gl.linkProgram(glProg);
+if (!gl.getProgramParameter(glProg, gl.LINK_STATUS))
+  throw new Error('Program link error: ' + gl.getProgramInfoLog(glProg));
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER,
+  new Float32Array([-1, -1,  1, -1,  -1, 1,  1, 1]),
+  gl.STATIC_DRAW);
+const aPosLoc = gl.getAttribLocation(glProg, 'a_pos');
+gl.enableVertexAttribArray(aPosLoc);
+gl.vertexAttribPointer(aPosLoc, 2, gl.FLOAT, false, 0, 0);
+gl.bindVertexArray(null);
+
+// RGBA8 texture – pre-coloured pixels uploaded from CPU each frame
+const tex     = gl.createTexture();
+const texData = new Uint8Array(TEX_W * TEX_H * 4);
+
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, TEX_W, TEX_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+/**
+ * Build texData from programs array.
+ *
+ * Pixel mapping (matches Python's render_program_frame transpose):
+ *   pixel (col, row) → program[col/8][row/8] at tape index (row%8)*8 + (col%8)
+ *
+ * Programs layout: programs[(gx * GRID_H + gy) * TAPE_SIZE + tape_idx]
+ */
+function buildTexData() {
+  const p   = programs;
+  const t   = texData;
+  const lut = COLOR_LUT;
+
+  for (let gy = 0; gy < GRID_H; gy++) {
+    const gyCell = gy * CELL;
+    for (let gx = 0; gx < GRID_W; gx++) {
+      const progBase = (gx * GRID_H + gy) * TAPE_SIZE;
+      const colBase  = gx * CELL;
+      for (let py = 0; py < CELL; py++) {
+        const rowOff  = (gyCell + py) * TEX_W + colBase;
+        const tapeRow = py * CELL;
+        for (let px = 0; px < CELL; px++) {
+          const val = p[progBase + tapeRow + px];
+          const ci  = val << 2;           // val * 4 into COLOR_LUT
+          const pi  = (rowOff + px) << 2; // pixel index * 4 into texData
+          t[pi]     = lut[ci];
+          t[pi + 1] = lut[ci + 1];
+          t[pi + 2] = lut[ci + 2];
+          t[pi + 3] = 255;
+        }
+      }
+    }
+  }
+}
+
+function uploadAndRender() {
+  buildTexData();
+
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TEX_W, TEX_H,
+                   gl.RGBA, gl.UNSIGNED_BYTE, texData);
+
+  gl.viewport(0, 0, TEX_W, TEX_H);
+  gl.useProgram(glProg);
+  gl.bindVertexArray(vao);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(gl.getUniformLocation(glProg, 'u_tex'), 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+function initSim(seed) {
+  rng   = makePRNG(seed >>> 0);
+  epoch = 0;
+  rng.fill(programs);
+}
+
+initSim(1);
+
+// ── Main animation loop ───────────────────────────────────────────────────────
+const statsEl    = document.getElementById('stats');
+let fpsTimer     = performance.now();
+let fpsFrames    = 0;
+let displayFps   = 0;
+
+function frame() {
+  if (!paused) {
+    const n = parseInt(document.getElementById('speedSlider').value, 10);
+    for (let i = 0; i < n; i++) runEpoch();
+  }
+
+  uploadAndRender();
+
+  // FPS counter (updated every second)
+  fpsFrames++;
+  const now = performance.now();
+  if (now - fpsTimer >= 1000) {
+    displayFps = Math.round(fpsFrames * 1000 / (now - fpsTimer));
+    fpsFrames  = 0;
+    fpsTimer   = now;
+  }
+
+  const pct = opcodePercent().toFixed(2);
+  statsEl.textContent =
+    `epoch ${epoch} | opcode density ${pct}% | ${displayFps} fps | ${GRID_W}\u00d7${GRID_H} grid`;
+
+  requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+const btnPlay = document.getElementById('btnPlay');
+btnPlay.addEventListener('click', () => {
+  paused = !paused;
+  btnPlay.innerHTML = paused ? '&#9654; Play' : '&#9646;&#9646; Pause';
+});
+
+document.getElementById('btnStep').addEventListener('click', () => {
+  const wasPaused = paused;
+  paused = true;
+  runEpoch();
+  uploadAndRender();
+  statsEl.textContent =
+    `epoch ${epoch} | opcode density ${opcodePercent().toFixed(2)}% | (stepped)`;
+  paused = wasPaused;
+});
+
+document.getElementById('btnReset').addEventListener('click', () => {
+  const seed = parseInt(document.getElementById('seedInput').value, 10) || 0;
+  initSim(seed);
+});
+
+document.getElementById('seedInput').addEventListener('change', function () {
+  initSim(parseInt(this.value, 10) || 0);
+});
+
+const speedSlider = document.getElementById('speedSlider');
+const speedValEl  = document.getElementById('speedVal');
+speedSlider.addEventListener('input', function () {
+  speedValEl.textContent = this.value + '\u00d7';
+});
+
+const mutSlider = document.getElementById('mutSlider');
+const mutValEl  = document.getElementById('mutVal');
+mutSlider.addEventListener('input', function () {
+  const scale = this.value / 100;
+  mutRate = BASE_MUT * scale;
+  mutValEl.textContent = scale.toFixed(2) + '\u00d7';
+});
+
+// ── Legend ────────────────────────────────────────────────────────────────────
+const LEGEND_ENTRIES = [
+  [LT,     '<', 'head0 left'],
+  [GT,     '>', 'head0 right'],
+  [LB,     '{', 'head1 left'],
+  [RB,     '}', 'head1 right'],
+  [MINUS,  '-', 'decrement'],
+  [PLUS,   '+', 'increment'],
+  [DOT,    '.', 'write (h0\u2192h1)'],
+  [COMMA,  ',', 'read (h1\u2192h0)'],
+  [LBRACK, '[', 'loop open'],
+  [RBRACK, ']', 'loop close'],
+];
+
+const legendEl = document.getElementById('legend');
+for (const [op, sym, desc] of LEGEND_ENTRIES) {
+  const [r, g, b] = PALETTE.get(op);
+  const el = document.createElement('div');
+  el.className = 'legend-item';
+  el.innerHTML =
+    `<div class="swatch" style="background:rgb(${r},${g},${b})"></div>${sym}\u00a0${desc}`;
+  legendEl.appendChild(el);
+}
+</script>
+</body>
+</html>
