@@ -34,7 +34,6 @@
       display: block;
       image-rendering: pixelated;
       image-rendering: crisp-edges;
-      /* Scale down from 1920×1080 to fit screen */
       max-width: min(100vw - 28px, 1280px);
       height: auto;
       border: 1px solid #222;
@@ -98,14 +97,14 @@
 </head>
 <body>
 
-<h1>Artificial Life <span style="font-size:0.5em;color:#444;font-weight:normal">v1.2</span></h1>
+<h1>Artificial Life <span style="font-size:0.5em;color:#444;font-weight:normal">v1.3</span></h1>
 <p class="subtitle">
   240&times;135 grid of self-modifying programs (32&thinsp;400 programs, 64 bytes each).<br>
   Each epoch: random neighbour pairs concatenate tapes, run up to 8&thinsp;192 steps, split back.<br>
   <a href="https://arxiv.org/abs/2406.19108" target="_blank">Reproduction of "Computational Life" (arxiv:2406.19108)</a>
 </p>
 
-<div id="stats">Starting simulation worker&hellip;</div>
+<div id="stats">Starting&hellip;</div>
 <canvas id="canvas"></canvas>
 
 <div id="controls">
@@ -134,240 +133,289 @@
 <div id="legend"></div>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
-     SIMULATION WORKER  (embedded; loaded as a Blob URL)
-     Runs in a separate thread so the UI / WebGL render loop never blocks.
+     SINGLE-WORKER FALLBACK  (used when crossOriginIsolated = false)
+     Identical to v1.2 — runs entire simulation in one thread.
      ═══════════════════════════════════════════════════════════════════════ -->
-<script type="text/plain" id="worker-src">
+<script type="text/plain" id="single-worker-src">
 'use strict';
+const GT=62,LT=60,RB=125,LB=123,PLUS=43,MINUS=45,DOT=46,COMMA=44,LBRACK=91,RBRACK=93;
+const GRID_W=240,GRID_H=135,N_PROG=GRID_W*GRID_H,TAPE=64,CONCAT=128,MAXITER=8192;
+const BASE_MUT=0.024/100.0;
+let programs=new Uint8Array(N_PROG*TAPE);
 
-// ── Opcode byte values  (match Python: map(ord, "<>{}-+.,[]")) ────────────────
-const GT=62, LT=60, RB=125, LB=123, PLUS=43, MINUS=45, DOT=46, COMMA=44, LBRACK=91, RBRACK=93;
-
-// ── Grid constants ────────────────────────────────────────────────────────────
-const GRID_W  = 240;
-const GRID_H  = 135;
-const N_PROG  = GRID_W * GRID_H;   // 32 400
-const TAPE    = 64;
-const CONCAT  = TAPE * 2;          // 128  (concatenated pair tape)
-const MAXITER = 8192;              // max brainfuck steps per pair  (= 2^13)
-const BASE_MUT = 0.024 / 100.0;   // default background mutation rate
-
-// ── Programs memory layout ────────────────────────────────────────────────────
-// Indexed as:  programs[ (gy * GRID_W + gx) * TAPE + byte ]
-// Row-major by gy first  →  cache-friendly when building the render texture
-// (which is also row-major: rows of pixels ordered top-to-bottom, left-to-right)
-let programs = new Uint8Array(N_PROG * TAPE);
-
-// ── PRNG  (Mulberry32 – fast, good quality) ───────────────────────────────────
-function makePRNG(seed) {
-  let s = (seed ^ 0xDEADBEEF) >>> 0;
-  function next() {
-    s = (s + 0x6D2B79F5) >>> 0;
-    let t = Math.imul(s ^ (s >>> 15), s | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return (t ^ (t >>> 14)) >>> 0;
-  }
-  return {
-    int:     n  => next() % n,
-    fill:    arr => { for (let i = 0; i < arr.length; i++) arr[i] = next() & 0xFF; },
-    shuffle: (arr, n) => {
-      for (let i = n - 1; i > 0; i--) {
-        const j = next() % (i + 1);
-        const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
-      }
-    },
-  };
+function makePRNG(seed){
+  let s=(seed^0xDEADBEEF)>>>0;
+  function next(){s=(s+0x6D2B79F5)>>>0;let t=Math.imul(s^(s>>>15),s|1);t^=t+Math.imul(t^(t>>>7),t|61);return(t^(t>>>14))>>>0;}
+  return{int:n=>next()%n,fill:arr=>{for(let i=0;i<arr.length;i++)arr[i]=next()&0xFF;},shuffle:(arr,n)=>{for(let i=n-1;i>0;i--){const j=next()%(i+1);const t=arr[i];arr[i]=arr[j];arr[j]=t;}}};
 }
-let rng = makePRNG(1);
+let rng=makePRNG(1);
 
-// ── Neighbourhood table  (built once, matches Python's build_neighborhood) ────
-// 5×5 window excluding self, clamped at grid edges  →  up to 24 neighbours.
-const neighbors  = new Int32Array(N_PROG * 24);
-const nCounts    = new Int32Array(N_PROG);
-(function buildNeighbourhood() {
-  for (let gy = 0; gy < GRID_H; gy++) {
-    for (let gx = 0; gx < GRID_W; gx++) {
-      const idx = gy * GRID_W + gx;
-      const x0 = Math.max(0, gx - 2), x1 = Math.min(GRID_W, gx + 3);
-      const y0 = Math.max(0, gy - 2), y1 = Math.min(GRID_H, gy + 3);
-      let c = 0;
-      for (let ny = y0; ny < y1; ny++)
-        for (let nx = x0; nx < x1; nx++)
-          if (nx !== gx || ny !== gy)
-            neighbors[idx * 24 + c++] = ny * GRID_W + nx;
-      nCounts[idx] = c;
-    }
-  }
-})();
+const neighbors=new Int32Array(N_PROG*24),nCounts=new Int32Array(N_PROG);
+(function(){for(let gy=0;gy<GRID_H;gy++)for(let gx=0;gx<GRID_W;gx++){const idx=gy*GRID_W+gx,x0=Math.max(0,gx-2),x1=Math.min(GRID_W,gx+3),y0=Math.max(0,gy-2),y1=Math.min(GRID_H,gy+3);let c=0;for(let ny=y0;ny<y1;ny++)for(let nx=x0;nx<x1;nx++)if(nx!==gx||ny!==gy)neighbors[idx*24+c++]=ny*GRID_W+nx;nCounts[idx]=c;}})();
 
-// ── Pre-allocated epoch scratch buffers  (avoids GC pressure) ─────────────────
-const scratch   = new Uint8Array(CONCAT);   // concatenated pair tape
-const order     = new Int32Array(N_PROG);   // random traversal order
-const proposals = new Int32Array(N_PROG);   // each cell's proposed partner
-const taken     = new Uint8Array(N_PROG);   // conflict guard
+const scratch=new Uint8Array(CONCAT),order=new Int32Array(N_PROG),proposals=new Int32Array(N_PROG),taken=new Uint8Array(N_PROG);
 
-// ── Brainfuck interpreter  (matches Python's run_tape exactly) ────────────────
-// Operates on `tape` in-place.  tape.length must equal CONCAT (128) here.
-function runTape(tape) {
-  const len = CONCAT;
-  let pc = 0, h0 = 0, h1 = 0;
-  for (let it = 0; it < MAXITER; it++) {
-    if (pc >= len || pc < 0) break;
-    const op = tape[pc];
-    switch (op) {
-      case GT:    h0 = h0 + 1 < len ? h0 + 1 : 0;     break;
-      case LT:    h0 = h0 > 0       ? h0 - 1 : len-1;  break;
-      case RB:    h1 = h1 + 1 < len ? h1 + 1 : 0;     break;
-      case LB:    h1 = h1 > 0       ? h1 - 1 : len-1;  break;
-      case PLUS:  tape[h0] = (tape[h0] + 1) & 0xFF;   break;
-      case MINUS: tape[h0] = tape[h0] > 0 ? tape[h0] - 1 : 255; break;
-      case DOT:   tape[h1] = tape[h0];                 break;
-      case COMMA: tape[h0] = tape[h1];                 break;
-      case LBRACK:
-        if (tape[h0] === 0) {
-          // seek forward to matching ]
-          let d = 1, j = pc;
-          while (++j < len) {
-            if      (tape[j] === LBRACK)           d++;
-            else if (tape[j] === RBRACK && --d===0) break;
-          }
-          if (d !== 0) return;   // unmatched → halt
-          pc = j;                // jump to ], then pc++ skips past it
-        }
-        break;
-      case RBRACK:
-        if (tape[h0] !== 0) {
-          // seek backward to matching [
-          let d = 1, j = pc;
-          while (--j >= 0) {
-            if      (tape[j] === RBRACK)           d++;
-            else if (tape[j] === LBRACK && --d===0) break;
-          }
-          if (d !== 0) return;   // unmatched → halt
-          pc = j;                // jump to [, then pc++ steps into loop body
-        }
-        break;
+function runTape(tape){
+  const len=CONCAT;let pc=0,h0=0,h1=0;
+  for(let it=0;it<MAXITER;it++){
+    if(pc>=len||pc<0)break;
+    const op=tape[pc];
+    switch(op){
+      case GT:h0=h0+1<len?h0+1:0;break;case LT:h0=h0>0?h0-1:len-1;break;
+      case RB:h1=h1+1<len?h1+1:0;break;case LB:h1=h1>0?h1-1:len-1;break;
+      case PLUS:tape[h0]=(tape[h0]+1)&0xFF;break;case MINUS:tape[h0]=tape[h0]>0?tape[h0]-1:255;break;
+      case DOT:tape[h1]=tape[h0];break;case COMMA:tape[h0]=tape[h1];break;
+      case LBRACK:if(tape[h0]===0){let d=1,j=pc;while(++j<len){if(tape[j]===LBRACK)d++;else if(tape[j]===RBRACK&&--d===0)break;}if(d!==0)return;pc=j;}break;
+      case RBRACK:if(tape[h0]!==0){let d=1,j=pc;while(--j>=0){if(tape[j]===RBRACK)d++;else if(tape[j]===LBRACK&&--d===0)break;}if(d!==0)return;pc=j;}break;
     }
     pc++;
   }
 }
 
-// ── One simulation epoch  (matches Python's run_epochs inner loop) ─────────────
-let epoch   = 0;
-let mutRate = BASE_MUT;
+let epoch=0,mutRate=BASE_MUT,running=false,targetMs=0,lastSendTime=0;
 
-function runEpoch() {
-  // 1. Random traversal order
-  for (let i = 0; i < N_PROG; i++) order[i] = i;
-  rng.shuffle(order, N_PROG);
-
-  // 2. Each cell proposes a random neighbour (matches Python's choices array)
-  for (let i = 0; i < N_PROG; i++) {
-    const nc = nCounts[i];
-    proposals[i] = nc > 0 ? neighbors[i * 24 + rng.int(nc)] : -1;
-  }
-
-  // 3. Select non-conflicting pairs  (matches Python's select_pairs / run_epoch_pairs)
+function runEpoch(){
+  for(let i=0;i<N_PROG;i++)order[i]=i;
+  rng.shuffle(order,N_PROG);
+  for(let i=0;i<N_PROG;i++){const nc=nCounts[i];proposals[i]=nc>0?neighbors[i*24+rng.int(nc)]:-1;}
   taken.fill(0);
-  for (let oi = 0; oi < N_PROG; oi++) {
-    const p = order[oi], n = proposals[p];
-    if (n < 0 || taken[p] || taken[n]) continue;
-    taken[p] = taken[n] = 1;
-
-    // Concatenate, interpret, split  (matches run_epoch_pairs)
-    const pb = p * TAPE, nb = n * TAPE;
-    scratch.set(programs.subarray(pb, pb + TAPE), 0);
-    scratch.set(programs.subarray(nb, nb + TAPE), TAPE);
+  for(let oi=0;oi<N_PROG;oi++){
+    const p=order[oi],n=proposals[p];
+    if(n<0||taken[p]||taken[n])continue;
+    taken[p]=taken[n]=1;
+    const pb=p*TAPE,nb=n*TAPE;
+    scratch.set(programs.subarray(pb,pb+TAPE),0);
+    scratch.set(programs.subarray(nb,nb+TAPE),TAPE);
     runTape(scratch);
-    programs.set(scratch.subarray(0,    TAPE), pb);
-    programs.set(scratch.subarray(TAPE),       nb);
+    programs.set(scratch.subarray(0,TAPE),pb);
+    programs.set(scratch.subarray(TAPE),nb);
   }
-
-  // 4. Background mutation  (matches apply_background_mutation)
-  if (mutRate > 0) {
-    const sz = programs.length;
-    // Approximate binomial with fixed count (fine for small rates)
-    const nm = Math.round(sz * mutRate);
-    for (let i = 0; i < nm; i++)
-      programs[rng.int(sz)] = rng.int(256);
-  }
+  if(mutRate>0){const sz=programs.length,nm=Math.round(sz*mutRate);for(let i=0;i<nm;i++)programs[rng.int(sz)]=rng.int(256);}
   epoch++;
 }
 
-// ── Simulation control ────────────────────────────────────────────────────────
-let running      = false;
-// targetMs = 0  → max speed (time-sliced: ~50ms of work per event-loop task)
-// targetMs > 0  → slowed mode (1 epoch then wait targetMs ms before next)
-let targetMs     = 0;
-let lastSendTime = 0;   // throttle: avoid flooding main thread with postMessages
+function initSim(seed){rng=makePRNG(seed>>>0);epoch=0;rng.fill(programs);}
+function sendState(){self.postMessage({epoch,programs:programs.slice()});lastSendTime=performance.now();}
 
-function initSim(seed) {
-  rng   = makePRNG(seed >>> 0);
-  epoch = 0;
-  rng.fill(programs);
+function loop(){
+  if(!running)return;
+  if(targetMs===0){const dl=performance.now()+50;do{runEpoch();}while(running&&performance.now()<dl);}
+  else runEpoch();
+  if(performance.now()-lastSendTime>=50)sendState();
+  if(running)setTimeout(loop,targetMs);
 }
 
-function sendState() {
-  // Copy programs so the worker keeps its own buffer and can continue mutating
-  self.postMessage({ epoch, programs: programs.slice() });
-  lastSendTime = performance.now();
-}
-
-function loop() {
-  if (!running) return;
-
-  if (targetMs === 0) {
-    // ── MAX SPEED: fill a ~50ms time slice without yielding ──────────────────
-    // Gives ~92% CPU utilisation (50ms work / ~54ms including setTimeout yield).
-    // Far better than one epoch per setTimeout which wastes the 4ms minimum delay.
-    const deadline = performance.now() + 50;
-    do { runEpoch(); } while (running && performance.now() < deadline);
-  } else {
-    // ── SLOWED: one epoch then wait ──────────────────────────────────────────
-    runEpoch();
+self.onmessage=function(e){
+  const d=e.data;
+  switch(d.cmd){
+    case'init':running=false;initSim(d.seed??1);sendState();break;
+    case'start':if(!running){running=true;loop();}break;
+    case'pause':running=false;sendState();break;
+    case'step':running=false;runEpoch();sendState();break;
+    case'setMut':mutRate=d.value;break;
+    case'setSpeed':targetMs=d.value;break;
   }
+};
+initSim(1);sendState();running=true;loop();
+</script>
 
-  // Throttle renders: don't flood the main thread faster than ~20 msgs/sec
-  if (performance.now() - lastSendTime >= 50) sendState();
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     SIM WORKER  (multi-core mode only)
+     Each instance receives a SharedArrayBuffer slice of pairs and runs
+     brainfuck in-place.  No data copying — reads/writes shared programs SAB.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script type="text/plain" id="sim-worker-src">
+'use strict';
+const GT=62,LT=60,RB=125,LB=123,PLUS=43,MINUS=45,DOT=46,COMMA=44,LBRACK=91,RBRACK=93;
+const TAPE=64,CONCAT=128,MAXITER=8192;
+let programs;
 
-  if (running) setTimeout(loop, targetMs);
+function runTape(tape){
+  const len=CONCAT;let pc=0,h0=0,h1=0;
+  for(let it=0;it<MAXITER;it++){
+    if(pc>=len||pc<0)break;
+    const op=tape[pc];
+    switch(op){
+      case GT:h0=h0+1<len?h0+1:0;break;case LT:h0=h0>0?h0-1:len-1;break;
+      case RB:h1=h1+1<len?h1+1:0;break;case LB:h1=h1>0?h1-1:len-1;break;
+      case PLUS:tape[h0]=(tape[h0]+1)&0xFF;break;case MINUS:tape[h0]=tape[h0]>0?tape[h0]-1:255;break;
+      case DOT:tape[h1]=tape[h0];break;case COMMA:tape[h0]=tape[h1];break;
+      case LBRACK:if(tape[h0]===0){let d=1,j=pc;while(++j<len){if(tape[j]===LBRACK)d++;else if(tape[j]===RBRACK&&--d===0)break;}if(d!==0)return;pc=j;}break;
+      case RBRACK:if(tape[h0]!==0){let d=1,j=pc;while(--j>=0){if(tape[j]===RBRACK)d++;else if(tape[j]===LBRACK&&--d===0)break;}if(d!==0)return;pc=j;}break;
+    }
+    pc++;
+  }
 }
 
-self.onmessage = function(e) {
-  const d = e.data;
-  switch (d.cmd) {
+self.onmessage=function(e){
+  const d=e.data;
+  if(d.cmd==='init'){
+    programs=new Uint8Array(d.sab);
+    self.postMessage({cmd:'ready'});
+  } else if(d.cmd==='run'){
+    // pairs = Int32Array of [p0,n0, p1,n1, ...] — non-overlapping cell indices
+    const pairs=d.pairs;
+    const scratch=new Uint8Array(CONCAT);
+    for(let i=0;i<pairs.length;i+=2){
+      const p=pairs[i],n=pairs[i+1];
+      const pb=p*TAPE,nb=n*TAPE;
+      scratch.set(programs.subarray(pb,pb+TAPE),0);
+      scratch.set(programs.subarray(nb,nb+TAPE),TAPE);
+      runTape(scratch);
+      programs.set(scratch.subarray(0,TAPE),pb);
+      programs.set(scratch.subarray(TAPE),nb);
+    }
+    self.postMessage({cmd:'done'});
+  }
+};
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     COORDINATOR WORKER  (multi-core mode only)
+     Owns: PRNG, neighbourhood table, shuffle/proposals/pair-selection.
+     Delegates: brainfuck execution to N sim workers via shared programs SAB.
+     Never copies programs data — main thread reads SAB directly for render.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script type="text/plain" id="coordinator-src">
+'use strict';
+const GRID_W=240,GRID_H=135,N_PROG=GRID_W*GRID_H,TAPE=64;
+const BASE_MUT=0.024/100.0;
+
+let programs; // Uint8Array view of SharedArrayBuffer
+
+function makePRNG(seed){
+  let s=(seed^0xDEADBEEF)>>>0;
+  function next(){s=(s+0x6D2B79F5)>>>0;let t=Math.imul(s^(s>>>15),s|1);t^=t+Math.imul(t^(t>>>7),t|61);return(t^(t>>>14))>>>0;}
+  return{int:n=>next()%n,fill:arr=>{for(let i=0;i<arr.length;i++)arr[i]=next()&0xFF;},shuffle:(arr,n)=>{for(let i=n-1;i>0;i--){const j=next()%(i+1);const t=arr[i];arr[i]=arr[j];arr[j]=t;}}};
+}
+let rng=makePRNG(1);
+
+const neighbors=new Int32Array(N_PROG*24),nCounts=new Int32Array(N_PROG);
+(function(){for(let gy=0;gy<GRID_H;gy++)for(let gx=0;gx<GRID_W;gx++){const idx=gy*GRID_W+gx,x0=Math.max(0,gx-2),x1=Math.min(GRID_W,gx+3),y0=Math.max(0,gy-2),y1=Math.min(GRID_H,gy+3);let c=0;for(let ny=y0;ny<y1;ny++)for(let nx=x0;nx<x1;nx++)if(nx!==gx||ny!==gy)neighbors[idx*24+c++]=ny*GRID_W+nx;nCounts[idx]=c;}})();
+
+const order=new Int32Array(N_PROG),proposals=new Int32Array(N_PROG),taken=new Uint8Array(N_PROG);
+const pairsA=new Int32Array(N_PROG>>1),pairsB=new Int32Array(N_PROG>>1);
+
+// ── Sim worker pool ───────────────────────────────────────────────────────────
+let simWorkers=[],nWorkers=0,workersReady=0,pendingStart=false;
+let pendingDone=0,continueAfterWorkers=null;
+
+function initWorkers(sab,simSrc,n){
+  nWorkers=n;
+  const url=URL.createObjectURL(new Blob([simSrc],{type:'text/javascript'}));
+  for(let i=0;i<n;i++){
+    const w=new Worker(url);
+    w.onmessage=function(e){
+      if(e.data.cmd==='ready'){
+        workersReady++;
+        if(workersReady===nWorkers){
+          self.postMessage({cmd:'workersReady',numWorkers:nWorkers});
+          if(pendingStart){pendingStart=false;startEpoch();}
+        }
+      } else if(e.data.cmd==='done'){
+        if(--pendingDone===0) continueAfterWorkers?.();
+      }
+    };
+    w.postMessage({cmd:'init',sab});
+    simWorkers.push(w);
+  }
+}
+
+// ── Epoch logic ───────────────────────────────────────────────────────────────
+function collectPairs(){
+  for(let i=0;i<N_PROG;i++)order[i]=i;
+  rng.shuffle(order,N_PROG);
+  for(let i=0;i<N_PROG;i++){const nc=nCounts[i];proposals[i]=nc>0?neighbors[i*24+rng.int(nc)]:-1;}
+  taken.fill(0);
+  let np=0;
+  for(let oi=0;oi<N_PROG;oi++){
+    const p=order[oi],n=proposals[p];
+    if(n<0||taken[p]||taken[n])continue;
+    taken[p]=taken[n]=1;
+    pairsA[np]=p;pairsB[np]=n;np++;
+  }
+  return np;
+}
+
+function dispatchPairs(np){
+  const cs=Math.ceil(np/nWorkers);
+  pendingDone=0;
+  for(let w=0;w<nWorkers;w++){
+    const s=w*cs,e2=Math.min(s+cs,np);
+    if(s>=np)continue;
+    const chunk=new Int32Array((e2-s)*2);
+    for(let i=s,j=0;i<e2;i++){chunk[j++]=pairsA[i];chunk[j++]=pairsB[i];}
+    pendingDone++;
+    simWorkers[w].postMessage({cmd:'run',pairs:chunk});
+  }
+  if(pendingDone===0) continueAfterWorkers?.();
+}
+
+let epoch=0,mutRate=BASE_MUT,running=false,targetMs=0,lastSendTime=0;
+
+function applyMutations(){
+  if(mutRate<=0)return;
+  const sz=programs.length,nm=Math.round(sz*mutRate);
+  for(let i=0;i<nm;i++)programs[rng.int(sz)]=rng.int(256);
+}
+
+function finishEpoch(){
+  epoch++;
+  const now=performance.now();
+  if(now-lastSendTime>=50||!running){self.postMessage({epoch});lastSendTime=now;}
+  if(running){
+    if(targetMs>0)setTimeout(startEpoch,targetMs);
+    else startEpoch();
+  }
+}
+
+function startEpoch(){
+  if(!running)return;
+  const np=collectPairs();
+  continueAfterWorkers=()=>{applyMutations();finishEpoch();};
+  dispatchPairs(np);
+}
+
+function initSim(seed){rng=makePRNG(seed>>>0);epoch=0;rng.fill(programs);}
+
+// ── Message handler ───────────────────────────────────────────────────────────
+self.onmessage=function(e){
+  const d=e.data;
+  switch(d.cmd){
     case 'init':
-      running = false;
-      initSim(d.seed ?? 1);
-      sendState();
+      running=false;
+      programs=new Uint8Array(d.sab);
+      initWorkers(d.sab,d.simSrc,d.numWorkers);
+      initSim(d.seed??1);
+      self.postMessage({epoch});   // initial state; workers still spinning up
       break;
     case 'start':
-      if (!running) { running = true; loop(); }
+      if(!running){
+        running=true;
+        if(workersReady===nWorkers)startEpoch();
+        else pendingStart=true;
+      }
       break;
     case 'pause':
-      running = false;
-      sendState();   // flush last state so UI updates immediately on pause
+      running=false;
+      self.postMessage({epoch});
       break;
-    case 'step':
-      running = false;
-      runEpoch();
-      sendState();
+    case 'step': {
+      running=false;
+      const np=collectPairs();
+      continueAfterWorkers=()=>{applyMutations();epoch++;self.postMessage({epoch});};
+      dispatchPairs(np);
       break;
-    case 'setMut':
-      mutRate = d.value;
-      break;
-    case 'setSpeed':
-      // targetMs = 0 → max speed; > 0 → ms delay between single epochs
-      targetMs = d.value;
+    }
+    case 'setMut': mutRate=d.value; break;
+    case 'setSpeed': targetMs=d.value; break;
+    case 'init2':   // re-init without rebuilding worker pool
+      running=false;
+      initSim(d.seed??1);
+      self.postMessage({epoch});
       break;
   }
 };
-
-// Auto-start: initialise and begin running immediately
-initSim(1);
-sendState();
-running = true;
-loop();
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -376,301 +424,259 @@ loop();
 <script>
 'use strict';
 
-// ── Palette (matches Python's build_color_lut) ────────────────────────────────
+// ── Palette ───────────────────────────────────────────────────────────────────
 const GT=62,LT=60,RB=125,LB=123,PLUS=43,MINUS=45,DOT=46,COMMA=44,LBRACK=91,RBRACK=93;
-const PALETTE = new Map([
-  [LT,    [239, 71,111]], [GT,    [255,209,102]],
-  [LB,    [  6,214,160]], [RB,    [ 17,138,178]],
-  [MINUS, [255,127, 80]], [PLUS,  [131, 56,236]],
-  [DOT,   [ 58,134,255]], [COMMA, [255,190, 11]],
-  [LBRACK,[139,201, 38]], [RBRACK,[255, 89, 94]],
+const PALETTE=new Map([
+  [LT,[239,71,111]],[GT,[255,209,102]],
+  [LB,[6,214,160]],[RB,[17,138,178]],
+  [MINUS,[255,127,80]],[PLUS,[131,56,236]],
+  [DOT,[58,134,255]],[COMMA,[255,190,11]],
+  [LBRACK,[139,201,38]],[RBRACK,[255,89,94]],
 ]);
-const BG = [20, 20, 20];
-const OPCODE_SET = new Set(PALETTE.keys());
-
-// Flat 256-entry RGBA lookup: COLOR_LUT[val*4..val*4+3] = r,g,b,255
-const COLOR_LUT = new Uint8Array(256 * 4);
-for (let i = 0; i < 256; i++) {
-  const c = PALETTE.get(i) ?? BG;
-  COLOR_LUT[i*4]=c[0]; COLOR_LUT[i*4+1]=c[1]; COLOR_LUT[i*4+2]=c[2]; COLOR_LUT[i*4+3]=255;
-}
+const BG=[20,20,20];
+const OPCODE_SET=new Set(PALETTE.keys());
+const COLOR_LUT=new Uint8Array(256*4);
+for(let i=0;i<256;i++){const c=PALETTE.get(i)??BG;COLOR_LUT[i*4]=c[0];COLOR_LUT[i*4+1]=c[1];COLOR_LUT[i*4+2]=c[2];COLOR_LUT[i*4+3]=255;}
 
 // ── Grid / texture dimensions ─────────────────────────────────────────────────
-const GRID_W = 240, GRID_H = 135;
-const TAPE   = 64,  CELL   = 8;          // CELL = pixels per tape cell side
-const TEX_W  = GRID_W * CELL;            // 1920 px
-const TEX_H  = GRID_H * CELL;            // 1080 px
-const BASE_MUT = 0.024 / 100.0;
+const GRID_W=240,GRID_H=135,TAPE=64,CELL=8;
+const TEX_W=GRID_W*CELL,TEX_H=GRID_H*CELL;  // 1920×1080
+const BASE_MUT=0.024/100.0;
+const SAB_SIZE=GRID_W*GRID_H*TAPE;           // 2,073,600 bytes
 
-// ── Canvas / WebGL2 setup ─────────────────────────────────────────────────────
-const canvas = document.getElementById('canvas');
-canvas.width  = TEX_W;
-canvas.height = TEX_H;
+// ── Canvas / WebGL2 ───────────────────────────────────────────────────────────
+const canvas=document.getElementById('canvas');
+canvas.width=TEX_W; canvas.height=TEX_H;
+const gl=canvas.getContext('webgl2',{alpha:false,antialias:false});
+if(!gl){document.body.innerHTML='<p style="color:#f55;padding:3em;text-align:center">WebGL2 required.</p>';throw new Error('no webgl2');}
 
-const gl = canvas.getContext('webgl2', { alpha: false, antialias: false });
-if (!gl) {
-  document.body.innerHTML =
-    '<p style="color:#f55;padding:3em;text-align:center">WebGL2 is required but unavailable in this browser.</p>';
-  throw new Error('WebGL2 not supported');
-}
-
-// Vertex shader: full-screen quad via triangle strip
-const VS = `#version 300 es
-in vec2 a_pos;
-out vec2 v_uv;
-void main() {
-  // flip Y so row 0 = top of screen (texture origin = bottom-left in OpenGL)
-  v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
-  gl_Position = vec4(a_pos, 0.0, 1.0);
-}`;
-
-// Fragment shader: sample pre-coloured RGBA texture
-const FS = `#version 300 es
+const VS=`#version 300 es
+in vec2 a_pos; out vec2 v_uv;
+void main(){v_uv=vec2(a_pos.x*.5+.5,.5-a_pos.y*.5);gl_Position=vec4(a_pos,0.,1.);}`;
+const FS=`#version 300 es
 precision mediump float;
-uniform sampler2D u_tex;
-in vec2 v_uv;
-out vec4 fragColor;
-void main() { fragColor = texture(u_tex, v_uv); }`;
+uniform sampler2D u_tex; in vec2 v_uv; out vec4 o;
+void main(){o=texture(u_tex,v_uv);}`;
 
-function makeShader(type, src) {
-  const sh = gl.createShader(type);
-  gl.shaderSource(sh, src);
-  gl.compileShader(sh);
-  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
-    throw new Error(gl.getShaderInfoLog(sh));
-  return sh;
-}
-const glProg = gl.createProgram();
-gl.attachShader(glProg, makeShader(gl.VERTEX_SHADER, VS));
-gl.attachShader(glProg, makeShader(gl.FRAGMENT_SHADER, FS));
+function mkShader(t,s){const sh=gl.createShader(t);gl.shaderSource(sh,s);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;}
+const glProg=gl.createProgram();
+gl.attachShader(glProg,mkShader(gl.VERTEX_SHADER,VS));
+gl.attachShader(glProg,mkShader(gl.FRAGMENT_SHADER,FS));
 gl.linkProgram(glProg);
-if (!gl.getProgramParameter(glProg, gl.LINK_STATUS))
-  throw new Error(gl.getProgramInfoLog(glProg));
+if(!gl.getProgramParameter(glProg,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(glProg));
 
-// VAO + VBO for the full-screen quad
-const vao = gl.createVertexArray();
-gl.bindVertexArray(vao);
-const vbo = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-const posLoc = gl.getAttribLocation(glProg, 'a_pos');
-gl.enableVertexAttribArray(posLoc);
-gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+const vao=gl.createVertexArray();gl.bindVertexArray(vao);
+const vbo=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vbo);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+const posLoc=gl.getAttribLocation(glProg,'a_pos');
+gl.enableVertexAttribArray(posLoc);gl.vertexAttribPointer(posLoc,2,gl.FLOAT,false,0,0);
 gl.bindVertexArray(null);
 
-// RGBA8 texture  (pre-coloured pixels, built on CPU then uploaded to GPU)
-const tex     = gl.createTexture();
-const texData = new Uint8Array(TEX_W * TEX_H * 4);  // ~8 MB
+const tex=gl.createTexture();
+const texData=new Uint8Array(TEX_W*TEX_H*4);
+gl.bindTexture(gl.TEXTURE_2D,tex);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,TEX_W,TEX_H,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
 
-gl.bindTexture(gl.TEXTURE_2D, tex);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, TEX_W, TEX_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-
-/**
- * Build texData from programs array.
- *
- * Pixel mapping (matches Python's render_program_frame):
- *   programs layout : programs[(gy*GRID_W + gx)*TAPE + tape_idx]
- *   texture layout  : texData[row * TEX_W + col]  (RGBA, row-major)
- *   where: col = gx*CELL + px,  row = gy*CELL + py,  tape_idx = py*CELL + px
- *
- * Outer loops ordered (gy, py, gx, px) so:
- *   - texture writes are strictly sequential           → cache-friendly
- *   - programs reads stride TAPE=64 bytes per gx step  → fits cache line
- */
-function buildTexData(programs) {
-  const lut = COLOR_LUT;
-  const p   = programs;
-  const t   = texData;
-  for (let gy = 0; gy < GRID_H; gy++) {
-    const gyBase = gy * GRID_W * TAPE;          // programs row base for this gy
-    const gyPix  = gy * CELL * TEX_W;          // texture row base (pixel units × 4 later)
-    for (let py = 0; py < CELL; py++) {
-      const texRow  = gyPix + py * TEX_W;       // texture row offset (in pixels)
-      const tapeRow = py * CELL;               // tape row offset within a program
-      for (let gx = 0; gx < GRID_W; gx++) {
-        const progOff = gyBase + gx * TAPE + tapeRow;
-        const texOff  = (texRow + gx * CELL) << 2;   // ×4 for RGBA
-        for (let px = 0; px < CELL; px++) {
-          const val = p[progOff + px];
-          const ci  = val << 2;
-          const ti  = texOff + (px << 2);
-          t[ti]   = lut[ci];
-          t[ti+1] = lut[ci+1];
-          t[ti+2] = lut[ci+2];
-          t[ti+3] = 255;
-        }
+function buildTexData(p){
+  const lut=COLOR_LUT,t=texData;
+  for(let gy=0;gy<GRID_H;gy++){
+    const gyBase=gy*GRID_W*TAPE,gyPix=gy*CELL*TEX_W;
+    for(let py=0;py<CELL;py++){
+      const texRow=gyPix+py*TEX_W,tapeRow=py*CELL;
+      for(let gx=0;gx<GRID_W;gx++){
+        const po=gyBase+gx*TAPE+tapeRow,to=(texRow+gx*CELL)<<2;
+        for(let px=0;px<CELL;px++){const v=p[po+px],ci=v<<2,ti=to+(px<<2);t[ti]=lut[ci];t[ti+1]=lut[ci+1];t[ti+2]=lut[ci+2];t[ti+3]=255;}
       }
     }
   }
 }
 
-function glRender() {
-  gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TEX_W, TEX_H, gl.RGBA, gl.UNSIGNED_BYTE, texData);
-  gl.viewport(0, 0, TEX_W, TEX_H);
-  gl.useProgram(glProg);
-  gl.bindVertexArray(vao);
-  gl.uniform1i(gl.getUniformLocation(glProg, 'u_tex'), 0);
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+function glRender(){
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,TEX_W,TEX_H,gl.RGBA,gl.UNSIGNED_BYTE,texData);
+  gl.viewport(0,0,TEX_W,TEX_H);
+  gl.useProgram(glProg);gl.bindVertexArray(vao);
+  gl.uniform1i(gl.getUniformLocation(glProg,'u_tex'),0);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
 }
 
 // ── Worker setup ──────────────────────────────────────────────────────────────
-const workerSrc  = document.getElementById('worker-src').textContent;
-const workerBlob = new Blob([workerSrc], { type: 'text/javascript' });
-const worker     = new Worker(URL.createObjectURL(workerBlob));
+const statsEl=document.getElementById('stats');
+let programsView=null;   // Uint8Array — either SAB-backed (multi) or latest copy (single)
+let worker=null;
+let latestEpoch=0;
+let pendingRender=false;
+let paused=false;
+let multiCore=false;
+let numSimWorkers=0;
 
-let latestPrograms = null;   // most recent programs snapshot from worker
-let latestEpoch    = 0;
-let paused         = false;
+if(crossOriginIsolated){
+  // ── Multi-core path: SharedArrayBuffer + coordinator + sim workers ──────────
+  multiCore=true;
+  const sab=new SharedArrayBuffer(SAB_SIZE);
+  programsView=new Uint8Array(sab);   // stays constant; always current
 
-worker.onmessage = function(e) {
-  latestPrograms = e.data.programs;
-  latestEpoch    = e.data.epoch;
-  // Don't render here — let requestAnimationFrame handle it at vsync rate
-};
+  const coordSrc=document.getElementById('coordinator-src').textContent;
+  const simSrc=document.getElementById('sim-worker-src').textContent;
+  worker=new Worker(URL.createObjectURL(new Blob([coordSrc],{type:'text/javascript'})));
+
+  numSimWorkers=Math.max(1,(navigator.hardwareConcurrency||4)-2);
+
+  worker.onmessage=function(e){
+    const d=e.data;
+    if(d.cmd==='workersReady'){
+      numSimWorkers=d.numWorkers;
+      statsEl.textContent=`Multi-core: ${numSimWorkers} sim workers active`;
+    } else if('epoch' in d){
+      latestEpoch=d.epoch;
+      pendingRender=true;
+    }
+  };
+
+  worker.postMessage({cmd:'init',sab,simSrc,numWorkers:numSimWorkers,seed:1});
+  worker.postMessage({cmd:'start'});
+
+} else {
+  // ── Single-worker fallback ──────────────────────────────────────────────────
+  statsEl.textContent='Starting simulation worker\u2026';
+  const src=document.getElementById('single-worker-src').textContent;
+  worker=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
+
+  worker.onmessage=function(e){
+    programsView=e.data.programs;
+    latestEpoch=e.data.epoch;
+    pendingRender=true;
+  };
+}
 
 // ── Stats helpers ─────────────────────────────────────────────────────────────
-function opcodePercent(programs) {
-  let n = 0;
-  for (let i = 0; i < programs.length; i++) if (OPCODE_SET.has(programs[i])) n++;
-  return 100 * n / programs.length;
+function opcodePercent(p){let n=0;for(let i=0;i<p.length;i++)if(OPCODE_SET.has(p[i]))n++;return 100*n/p.length;}
+
+const rateSamples=[];
+function recordEpoch(ep){
+  const now=performance.now();
+  rateSamples.push({epoch:ep,t:now});
+  while(rateSamples.length>1&&now-rateSamples[0].t>2000)rateSamples.shift();
+}
+function epochsPerSec(){
+  if(rateSamples.length<2)return 0;
+  const a=rateSamples[0],b=rateSamples[rateSamples.length-1],dt=(b.t-a.t)/1000;
+  return dt<0.1?0:(b.epoch-a.epoch)/dt;
+}
+function fmtRate(eps){
+  if(eps<=0)return'\u2014';
+  if(eps>=1000)return(eps/1000).toFixed(1)+'K ep/s';
+  if(eps>=10)return Math.round(eps)+' ep/s';
+  return eps.toFixed(1)+' ep/s';
 }
 
-// Rolling epoch-rate estimator (uses a sliding ~2s window of samples)
-const rateSamples = [];  // [{epoch, t}]
-function recordEpoch(ep) {
-  const now = performance.now();
-  rateSamples.push({ epoch: ep, t: now });
-  // Keep only the last 2 seconds worth
-  while (rateSamples.length > 1 && now - rateSamples[0].t > 2000) rateSamples.shift();
-}
-function epochsPerSec() {
-  if (rateSamples.length < 2) return 0;
-  const a = rateSamples[0], b = rateSamples[rateSamples.length - 1];
-  const dt = (b.t - a.t) / 1000;
-  if (dt < 0.1) return 0;
-  return (b.epoch - a.epoch) / dt;
-}
-function fmtRate(eps) {
-  if (eps <= 0) return '—';
-  if (eps >= 1000) return (eps / 1000).toFixed(1) + 'K ep/s';
-  if (eps >= 10)   return Math.round(eps) + ' ep/s';
-  return eps.toFixed(1) + ' ep/s';
-}
+// ── Render loop ───────────────────────────────────────────────────────────────
+let fps=0,fpsCount=0,fpsTimer=performance.now();
 
-// ── Render loop  (decoupled from simulation speed) ────────────────────────────
-const statsEl = document.getElementById('stats');
-let fps = 0, fpsCount = 0, fpsTimer = performance.now();
-
-function frame() {
-  if (latestPrograms) {
-    buildTexData(latestPrograms);
+function frame(){
+  if(pendingRender&&programsView){
+    pendingRender=false;
+    buildTexData(programsView);
     glRender();
 
     fpsCount++;
-    const now = performance.now();
-    if (now - fpsTimer >= 1000) {
-      fps = Math.round(fpsCount * 1000 / (now - fpsTimer));
-      fpsCount = 0;
-      fpsTimer = now;
-    }
+    const now=performance.now();
+    if(now-fpsTimer>=1000){fps=Math.round(fpsCount*1000/(now-fpsTimer));fpsCount=0;fpsTimer=now;}
 
     recordEpoch(latestEpoch);
-    const pct = opcodePercent(latestPrograms).toFixed(2);
-    statsEl.textContent =
+    const pct=opcodePercent(programsView).toFixed(2);
+    const modeTag=multiCore?` \u2502 ${numSimWorkers} workers`:'';
+    statsEl.textContent=
       `epoch ${latestEpoch.toLocaleString()} \u2502 `+
       `opcode ${pct}% \u2502 `+
       `${fmtRate(epochsPerSec())} \u2502 `+
-      `${fps} fps`;
-
-    latestPrograms = null;   // mark consumed; next message will set a new one
+      `${fps} fps`+modeTag;
   }
   requestAnimationFrame(frame);
 }
-
-// Kick off render loop; worker auto-starts in its own init code
 requestAnimationFrame(frame);
 
 // ── UI controls ───────────────────────────────────────────────────────────────
-const btnPlay = document.getElementById('btnPlay');
-btnPlay.addEventListener('click', () => {
-  paused = !paused;
-  if (paused) {
-    worker.postMessage({ cmd: 'pause' });
-    btnPlay.innerHTML = '&#9654; Play';
+const btnPlay=document.getElementById('btnPlay');
+btnPlay.addEventListener('click',()=>{
+  paused=!paused;
+  if(paused){worker.postMessage({cmd:'pause'});btnPlay.innerHTML='&#9654; Play';}
+  else{worker.postMessage({cmd:'start'});btnPlay.innerHTML='&#9646;&#9646; Pause';}
+});
+
+document.getElementById('btnStep').addEventListener('click',()=>{
+  paused=true;btnPlay.innerHTML='&#9654; Play';
+  worker.postMessage({cmd:'step'});
+});
+
+document.getElementById('btnReset').addEventListener('click',()=>{
+  const seed=parseInt(document.getElementById('seedInput').value,10)||1;
+  paused=false;btnPlay.innerHTML='&#9646;&#9646; Pause';
+  rateSamples.length=0;
+  if(multiCore){
+    // Re-init without rebuilding worker pool (workers keep their SAB reference)
+    worker.postMessage({cmd:'init2',seed});
+    worker.postMessage({cmd:'start'});
   } else {
-    worker.postMessage({ cmd: 'start' });
-    btnPlay.innerHTML = '&#9646;&#9646; Pause';
+    worker.postMessage({cmd:'init',seed});
+    worker.postMessage({cmd:'start'});
   }
 });
 
-document.getElementById('btnStep').addEventListener('click', () => {
-  // Pause first, then run exactly one epoch
-  paused = true;
-  btnPlay.innerHTML = '&#9654; Play';
-  worker.postMessage({ cmd: 'step' });
-});
+document.getElementById('btnApplySeed').addEventListener('click',()=>document.getElementById('btnReset').click());
 
-document.getElementById('btnReset').addEventListener('click', () => {
-  const seed = parseInt(document.getElementById('seedInput').value, 10) || 1;
-  paused = false;
-  btnPlay.innerHTML = '&#9646;&#9646; Pause';
-  rateSamples.length = 0;   // reset rate estimator so ep/day doesn't show stale data
-  worker.postMessage({ cmd: 'init', seed });
-  // init stops the loop; restart it
-  worker.postMessage({ cmd: 'start' });
-});
-
-document.getElementById('btnApplySeed').addEventListener('click', () => {
-  document.getElementById('btnReset').click();
-});
-
-// Speed slider: position 20 = max (no delay), 1-19 = exponentially spaced delays.
-// At position v: delay ≈ 1500 / 2^((v-1)*7/18) ms  →  ~1500ms at v=1, ~14ms at v=19.
-// Browsers clamp setTimeout to ≥4ms, so positions 17-19 all feel "near-max".
-function sliderToDelayMs(v) {
-  if (v >= 20) return 0;                                  // 0 = max speed (time-sliced)
-  return Math.max(4, Math.round(1500 / Math.pow(2, (v - 1) * 7 / 18)));
+function sliderToDelayMs(v){
+  if(v>=20)return 0;
+  return Math.max(4,Math.round(1500/Math.pow(2,(v-1)*7/18)));
 }
-
-const speedSlider = document.getElementById('speedSlider');
-const speedValEl  = document.getElementById('speedVal');
-speedSlider.addEventListener('input', function() {
-  const v   = parseInt(this.value, 10);
-  const ms  = sliderToDelayMs(v);
-  speedValEl.textContent = ms === 0 ? 'Max' : '~' + Math.round(1000 / Math.max(ms, 4)) + ' ep/s';
-  worker.postMessage({ cmd: 'setSpeed', value: ms });
+const speedSlider=document.getElementById('speedSlider');
+const speedValEl=document.getElementById('speedVal');
+speedSlider.addEventListener('input',function(){
+  const v=parseInt(this.value,10),ms=sliderToDelayMs(v);
+  speedValEl.textContent=ms===0?'Max':'~'+Math.round(1000/Math.max(ms,4))+' ep/s';
+  worker.postMessage({cmd:'setSpeed',value:ms});
 });
-// Initialise worker speed to match default slider position (20 = Max)
-worker.postMessage({ cmd: 'setSpeed', value: 0 });
+worker.postMessage({cmd:'setSpeed',value:0});
 
-const mutSlider = document.getElementById('mutSlider');
-const mutValEl  = document.getElementById('mutVal');
-mutSlider.addEventListener('input', function() {
-  const scale = this.value / 100;
-  mutValEl.textContent = scale.toFixed(2) + '\u00d7';
-  worker.postMessage({ cmd: 'setMut', value: BASE_MUT * scale });
+const mutSlider=document.getElementById('mutSlider');
+const mutValEl=document.getElementById('mutVal');
+mutSlider.addEventListener('input',function(){
+  const scale=this.value/100;
+  mutValEl.textContent=scale.toFixed(2)+'\u00d7';
+  worker.postMessage({cmd:'setMut',value:BASE_MUT*scale});
 });
 
 // ── Legend ────────────────────────────────────────────────────────────────────
-const LEGEND = [
-  [LT,'<','head0 left'], [GT,'>','head0 right'],
-  [LB,'{','head1 left'], [RB,'}','head1 right'],
-  [MINUS,'-','decrement'], [PLUS,'+','increment'],
-  [DOT,'.','write h0\u2192h1'], [COMMA,',','read h1\u2192h0'],
-  [LBRACK,'[','loop open'], [RBRACK,']','loop close'],
+const LEGEND=[
+  [LT,'<','head0 left'],[GT,'>','head0 right'],
+  [LB,'{','head1 left'],[RB,'}','head1 right'],
+  [MINUS,'-','decrement'],[PLUS,'+','increment'],
+  [DOT,'.','write h0\u2192h1'],[COMMA,',','read h1\u2192h0'],
+  [LBRACK,'[','loop open'],[RBRACK,']','loop close'],
 ];
-const legendEl = document.getElementById('legend');
-for (const [op, sym, desc] of LEGEND) {
-  const [r,g,b] = PALETTE.get(op);
-  const el = document.createElement('div');
-  el.className = 'li';
-  el.innerHTML = `<div class="sw" style="background:rgb(${r},${g},${b})"></div>${sym}\u00a0${desc}`;
+const legendEl=document.getElementById('legend');
+for(const [op,sym,desc] of LEGEND){
+  const [r,g,b]=PALETTE.get(op);
+  const el=document.createElement('div');el.className='li';
+  el.innerHTML=`<div class="sw" style="background:rgb(${r},${g},${b})"></div>${sym}\u00a0${desc}`;
   legendEl.appendChild(el);
+}
+
+// ── Service worker registration (for COOP/COEP → crossOriginIsolated) ─────────
+// On first load: SW installs and activates, then we reload → multi-core unlocked.
+// On subsequent loads: crossOriginIsolated===true, multi-core path is taken above.
+if('serviceWorker' in navigator && location.protocol!=='file:'){
+  navigator.serviceWorker.register('sw.js').then(reg=>{
+    if(reg.installing){
+      reg.installing.addEventListener('statechange',ev=>{
+        if(ev.target.state==='activated') location.reload();
+      });
+    }
+  }).catch(err=>console.warn('SW registration failed:',err));
 }
 </script>
 </body>
