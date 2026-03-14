@@ -909,21 +909,17 @@ async function dispatchPairs(pairCount) {
 }
 
 // ── One epoch ────────────────────────────────────────────────────────────────
-async function runEpoch() {
-  // ① Shuffle (sequential — single RNG stream preserves snapshot replay)
+// Returns pairCount; populates pairsBuf. Pure sync — no yielding.
+function runEpochPre() {
   for (let i = 0; i < N; i++) orderBuf[i] = i;
   for (let i = N - 1; i > 0; i--) {
     const j = (rng() * (i + 1)) | 0;
     const tmp = orderBuf[i]; orderBuf[i] = orderBuf[j]; orderBuf[j] = tmp;
   }
-
-  // ② Propose neighbors (sequential — uses RNG)
   for (let i = 0; i < N; i++) {
     const cnt = neighborCounts[i];
     proposals[i] = cnt > 0 ? neighbors[i * 24 + ((rng() * cnt) | 0)] : NO_NEIGHBOR;
   }
-
-  // ③ Pair matching (sequential — takenBuf has read-write dependency chain)
   takenBuf.fill(0);
   let pairCount = 0;
   for (let i = 0; i < N; i++) {
@@ -935,23 +931,24 @@ async function runEpoch() {
     pairCount++;
   }
   lastPairCount = pairCount;
+  return pairCount;
+}
 
-  // ④ Execute pairs — embarrassingly parallel (each pair touches disjoint cells)
-  if (USE_WORKERS && pairCount > 0) {
-    await dispatchPairs(pairCount);
-  } else {
-    for (let pi = 0; pi < pairCount; pi++) {
-      const idxA = pairsBuf[pi * 2], idxB = pairsBuf[pi * 2 + 1];
-      const baseA = idxA * TAPE_SIZE, baseB = idxB * TAPE_SIZE;
-      concatTape.set(programs.subarray(baseA, baseA + TAPE_SIZE), 0);
-      concatTape.set(programs.subarray(baseB, baseB + TAPE_SIZE), TAPE_SIZE);
-      runTape(concatTape);
-      programs.set(concatTape.subarray(0, TAPE_SIZE), baseA);
-      programs.set(concatTape.subarray(TAPE_SIZE),    baseB);
-    }
+// Execute pairs on the main thread (fallback when workers are unavailable).
+function runPairsSync(pairCount) {
+  for (let pi = 0; pi < pairCount; pi++) {
+    const idxA = pairsBuf[pi * 2], idxB = pairsBuf[pi * 2 + 1];
+    const baseA = idxA * TAPE_SIZE, baseB = idxB * TAPE_SIZE;
+    concatTape.set(programs.subarray(baseA, baseA + TAPE_SIZE), 0);
+    concatTape.set(programs.subarray(baseB, baseB + TAPE_SIZE), TAPE_SIZE);
+    runTape(concatTape);
+    programs.set(concatTape.subarray(0, TAPE_SIZE), baseA);
+    programs.set(concatTape.subarray(TAPE_SIZE),    baseB);
   }
+}
 
-  // ⑤ Mutation (sequential — uses RNG)
+// Mutation + bookkeeping. Pure sync.
+function runEpochPost() {
   const mutRate = parseInt(document.getElementById('mutRate').value, 10) / 100000;
   if (mutRate > 0) {
     const expected = programs.length * mutRate;
@@ -967,9 +964,22 @@ async function runEpoch() {
     for (let m = 0; m < numMut; m++)
       programs[(rng() * programs.length) | 0] = (rng() * 256) | 0;
   }
-
   epoch++;
   perfEpochs++;
+}
+
+// Sync epoch (no workers). Zero async overhead.
+function runEpochSync() {
+  const pairCount = runEpochPre();
+  runPairsSync(pairCount);
+  runEpochPost();
+}
+
+// Async epoch (with workers). Only awaits the actual worker dispatch.
+async function runEpochAsync() {
+  const pairCount = runEpochPre();
+  if (pairCount > 0) await dispatchPairs(pairCount);
+  runEpochPost();
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -1167,14 +1177,22 @@ function updateRewindUI() {
 // ── Animation loop ───────────────────────────────────────────────────────────
 function loop() {
   if (!running) return;
-  loopAsync().then(() => {
-    if (running) animId = requestAnimationFrame(loop);
-  });
+  if (USE_WORKERS) {
+    // Async path: only yields inside dispatchPairs while workers run.
+    loopAsync().then(() => { if (running) animId = requestAnimationFrame(loop); });
+  } else {
+    // Sync path: tight loop, zero microtask overhead between epochs.
+    const epf = parseInt(document.getElementById('speed').value, 10);
+    for (let i = 0; i < epf; i++) { runEpochSync(); takeSnapshot(); }
+    render();
+    updateStats();
+    animId = requestAnimationFrame(loop);
+  }
 }
 
 async function loopAsync() {
   const epf = parseInt(document.getElementById('speed').value, 10);
-  for (let i = 0; i < epf; i++) { await runEpoch(); takeSnapshot(); }
+  for (let i = 0; i < epf; i++) { await runEpochAsync(); takeSnapshot(); }
   render();
   updateStats();
 }
@@ -1400,11 +1418,8 @@ btnToggle.addEventListener('click', () => running ? pauseSim() : startSim());
 
 document.getElementById('btnStep').addEventListener('click', async () => {
   if (running) return;
-  await runEpoch();
-  takeSnapshot();
-  render();
-  updateStats();
-  updateRewindUI();
+  if (USE_WORKERS) await runEpochAsync(); else runEpochSync();
+  takeSnapshot(); render(); updateStats(); updateRewindUI();
 });
 
 document.getElementById('btnReset').addEventListener('click', () => {
@@ -1484,7 +1499,8 @@ document.addEventListener('keydown', e => {
     running ? pauseSim() : startSim();
   }
   if (e.key === 'ArrowRight' && !running) {
-    runEpoch().then(() => { takeSnapshot(); render(); updateStats(); updateRewindUI(); });
+    const p = USE_WORKERS ? runEpochAsync() : Promise.resolve(runEpochSync());
+    p.then(() => { takeSnapshot(); render(); updateStats(); updateRewindUI(); });
   }
   if (e.key === 'e' || e.key === 'E') {
     document.getElementById('btnEntropy').click();
