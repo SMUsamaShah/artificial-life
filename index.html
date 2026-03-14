@@ -354,6 +354,7 @@
   <span>Opcodes: <span class="val" id="sOpcodes">—</span></span>
   <span>Pairs/ep: <span class="val" id="sPairs">—</span></span>
   <span>ep/s: <span class="val" id="sEps">—</span></span>
+  <span>fps: <span class="val" id="sFps">—</span></span>
 </div>
 
 <div id="canvas-wrap">
@@ -486,6 +487,7 @@ let animId   = 0;
 let rng;
 
 let perfEpochs = 0;
+let perfFrames = 0;
 let perfT0     = 0;
 let lastPairCount = 0;
 
@@ -582,7 +584,7 @@ function init() {
   for (let i = 0; i < programs.length; i++) programs[i] = (rng() * 256) | 0;
   buildNeighborhood();
 
-  epoch = 0; perfEpochs = 0; perfT0 = performance.now(); lastPairCount = 0;
+  epoch = 0; perfEpochs = 0; perfFrames = 0; perfT0 = performance.now(); lastPairCount = 0;
   snapshots = []; histEntropy = []; histUnique = [];
   pinnedCell = -1; copiedTape = null; isRewinding = false;
   cancelPasteMode();
@@ -770,6 +772,7 @@ function render() {
     for (let i = 3; i < d.length; i += 4) d[i] = 255;
   }
   renderMode === 'entropy' ? renderEntropy() : renderNormal();
+  perfFrames++;
 }
 
 function renderNormal() {
@@ -871,8 +874,11 @@ function updateStats() {
 
   const dt = performance.now() - perfT0;
   if (dt > 500) {
-    document.getElementById('sEps').textContent = (perfEpochs / dt * 1000).toFixed(1);
+    const inv = 1000 / dt;
+    document.getElementById('sEps').textContent = (perfEpochs * inv).toFixed(1);
+    document.getElementById('sFps').textContent = (perfFrames * inv).toFixed(1);
     perfEpochs = 0;
+    perfFrames = 0;
     perfT0 = performance.now();
   }
 }
