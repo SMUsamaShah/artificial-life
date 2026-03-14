@@ -650,7 +650,7 @@ function init() {
 
 // ── Canvas / renderer setup ───────────────────────────────────────────────────
 const canvas = document.getElementById('canvas');
-const gl     = canvas.getContext('webgl2');
+const gl     = canvas.getContext('webgl2', { alpha: false });
 const USE_GL = !!gl;
 // 2D context used as fallback and for zoom panel parent
 let ctx = null;
@@ -660,6 +660,13 @@ if (!USE_GL) ctx = canvas.getContext('2d', { alpha: false });
 let glNormalProg = null, glEntropyProg = null;
 let programsTex  = null, lutTex = null, entropyTex = null;
 let glInited     = false;
+// Texture packing: cells are laid out in rows of cellsPerRow cells.
+// texW = TAPE_SIZE * cellsPerRow, texH = ceil(N / cellsPerRow).
+// Needed when N > MAX_TEXTURE_SIZE (e.g. 32400 > 16384 on some GPUs).
+let progTexW = 0, progTexH = 0, cellsPerRow = 1;
+let entTexW  = 0, entTexH  = 0;
+// Cached uniform locations (set when programs change after createGLTextures).
+let uNormalLocs = null, uEntropyLocs = null;
 
 const VERT_SRC = `#version 300 es
 in vec2 aPos;
@@ -671,13 +678,16 @@ uniform sampler2D uPrograms;
 uniform sampler2D uLut;
 uniform ivec2 uGrid;
 uniform int uCanvasH;
+uniform int uCellsPerRow;
 out vec4 fragColor;
 void main() {
   int px = int(gl_FragCoord.x);
   int py = uCanvasH - 1 - int(gl_FragCoord.y);
   int cellIdx = (px / 8) * uGrid.y + (py / 8);
   int byteIdx = (py % 8) * 8 + (px % 8);
-  float v = texelFetch(uPrograms, ivec2(byteIdx, cellIdx), 0).r;
+  int cellRow = cellIdx / uCellsPerRow;
+  int cellCol = cellIdx % uCellsPerRow;
+  float v = texelFetch(uPrograms, ivec2(cellCol * 64 + byteIdx, cellRow), 0).r;
   int b = int(v * 255.0 + 0.5);
   fragColor = texelFetch(uLut, ivec2(b, 0), 0);
 }`;
@@ -711,6 +721,7 @@ function linkProgram(vert, frag) {
 function setupGL() {
   if (!USE_GL || glInited) return;
   glInited = true;
+  gl.clearColor(0, 0, 0, 1);
 
   const vert = compileShader(gl.VERTEX_SHADER, VERT_SRC);
   glNormalProg  = linkProgram(vert, compileShader(gl.FRAGMENT_SHADER, FRAG_NORMAL_SRC));
@@ -728,6 +739,19 @@ function setupGL() {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
   });
+  // Cache uniform locations once (avoids per-frame string lookups).
+  uNormalLocs  = { prog: glNormalProg,
+    uPrograms:    gl.getUniformLocation(glNormalProg, 'uPrograms'),
+    uLut:         gl.getUniformLocation(glNormalProg, 'uLut'),
+    uGrid:        gl.getUniformLocation(glNormalProg, 'uGrid'),
+    uCanvasH:     gl.getUniformLocation(glNormalProg, 'uCanvasH'),
+    uCellsPerRow: gl.getUniformLocation(glNormalProg, 'uCellsPerRow'),
+  };
+  uEntropyLocs = { prog: glEntropyProg,
+    uCellColors:  gl.getUniformLocation(glEntropyProg, 'uCellColors'),
+    uGrid:        gl.getUniformLocation(glEntropyProg, 'uGrid'),
+    uCanvasH:     gl.getUniformLocation(glEntropyProg, 'uCanvasH'),
+  };
 
   // Color LUT texture (256×1 RGBA8): maps byte value → color
   const lutData = new Uint8Array(256 * 4).fill(20);
@@ -749,21 +773,43 @@ function setupGL() {
 function createGLTextures() {
   if (!USE_GL) return;
 
-  // programs texture: R8 UNORM, width=TAPE_SIZE(64), height=N
+  // Compute safe texture dimensions: pack cellsPerRow cells per texture row
+  // so neither dimension exceeds MAX_TEXTURE_SIZE.
+  const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  cellsPerRow = Math.max(1, Math.ceil(N / maxTex));
+  progTexW    = TAPE_SIZE * cellsPerRow;
+  progTexH    = Math.ceil(N / cellsPerRow);
+
+  // Rebuild programs texture with correct packed layout.
+  // If cellsPerRow > 1 we need to repack the data row by row.
+  let texData = programs;
+  if (cellsPerRow > 1) {
+    texData = new Uint8Array(progTexW * progTexH);
+    for (let c = 0; c < N; c++) {
+      const row = Math.floor(c / cellsPerRow);
+      const col = c % cellsPerRow;
+      texData.set(programs.subarray(c * TAPE_SIZE, (c + 1) * TAPE_SIZE),
+                  row * progTexW + col * TAPE_SIZE);
+    }
+  }
+
   if (programsTex) gl.deleteTexture(programsTex);
   programsTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, programsTex);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, TAPE_SIZE, N, 0, gl.RED, gl.UNSIGNED_BYTE, programs);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, progTexW, progTexH, 0, gl.RED, gl.UNSIGNED_BYTE, texData);
 
-  // per-cell entropy color texture: RGBA8, width=N, height=1
+  // Entropy color texture: RGBA8, width=min(N,maxTex), height=ceil(N/maxTex).
+  entTexW = Math.min(N, maxTex);
+  entTexH = Math.ceil(N / entTexW);
+  const entW = entTexW, entH = entTexH;
   if (entropyTex) gl.deleteTexture(entropyTex);
   entropyTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, entropyTex);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, N, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, entW, entH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 }
 
 function resizeCanvas() {
@@ -987,6 +1033,7 @@ let imageData = null;
 
 function render() {
   if (USE_GL) {
+    gl.clear(gl.COLOR_BUFFER_BIT);
     renderMode === 'entropy' ? renderEntropyGL() : renderNormalGL();
   } else {
     if (!imageData || imageData.width !== canvas.width || imageData.height !== canvas.height) {
@@ -1001,41 +1048,47 @@ function render() {
 
 // ── WebGL render paths ────────────────────────────────────────────────────────
 function renderNormalGL() {
-  // Upload programs to GPU texture (CPU→GPU: ~2MB for full grid, fast on modern hw)
+  // Upload programs. For cellsPerRow=1 we can upload the flat array directly.
+  // For packed textures we must rebuild the row layout each frame.
   gl.bindTexture(gl.TEXTURE_2D, programsTex);
-  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TAPE_SIZE, N, gl.RED, gl.UNSIGNED_BYTE, programs);
+  if (cellsPerRow === 1) {
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, progTexW, progTexH, gl.RED, gl.UNSIGNED_BYTE, programs);
+  } else {
+    const packed = new Uint8Array(progTexW * progTexH);
+    for (let c = 0; c < N; c++) {
+      const row = Math.floor(c / cellsPerRow), col = c % cellsPerRow;
+      packed.set(programs.subarray(c * TAPE_SIZE, (c + 1) * TAPE_SIZE),
+                 row * progTexW + col * TAPE_SIZE);
+    }
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, progTexW, progTexH, gl.RED, gl.UNSIGNED_BYTE, packed);
+  }
 
   gl.useProgram(glNormalProg);
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, programsTex);
-  gl.uniform1i(gl.getUniformLocation(glNormalProg, 'uPrograms'), 0);
-  gl.activeTexture(gl.TEXTURE1);
-  gl.bindTexture(gl.TEXTURE_2D, lutTex);
-  gl.uniform1i(gl.getUniformLocation(glNormalProg, 'uLut'), 1);
-  gl.uniform2i(gl.getUniformLocation(glNormalProg, 'uGrid'), WIDTH, HEIGHT);
-  gl.uniform1i(gl.getUniformLocation(glNormalProg, 'uCanvasH'), canvas.height);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, programsTex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, lutTex);
+  gl.uniform1i(uNormalLocs.uPrograms,    0);
+  gl.uniform1i(uNormalLocs.uLut,         1);
+  gl.uniform2i(uNormalLocs.uGrid,        WIDTH, HEIGHT);
+  gl.uniform1i(uNormalLocs.uCanvasH,     canvas.height);
+  gl.uniform1i(uNormalLocs.uCellsPerRow, cellsPerRow);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
 function renderEntropyGL() {
-  // Compute per-cell entropy on CPU, upload as RGBA8 color texture
+  const entW = entTexW;
   const colors = new Uint8Array(N * 4);
   for (let i = 0; i < N; i++) {
     const [r, g, b] = entropyToRgb(tapeEntropy(i * TAPE_SIZE));
-    colors[i * 4    ] = r;
-    colors[i * 4 + 1] = g;
-    colors[i * 4 + 2] = b;
-    colors[i * 4 + 3] = 255;
+    colors[i * 4] = r; colors[i * 4 + 1] = g; colors[i * 4 + 2] = b; colors[i * 4 + 3] = 255;
   }
   gl.bindTexture(gl.TEXTURE_2D, entropyTex);
-  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, N, 1, gl.RGBA, gl.UNSIGNED_BYTE, colors);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, entW, entTexH, gl.RGBA, gl.UNSIGNED_BYTE, colors);
 
   gl.useProgram(glEntropyProg);
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, entropyTex);
-  gl.uniform1i(gl.getUniformLocation(glEntropyProg, 'uCellColors'), 0);
-  gl.uniform2i(gl.getUniformLocation(glEntropyProg, 'uGrid'), WIDTH, HEIGHT);
-  gl.uniform1i(gl.getUniformLocation(glEntropyProg, 'uCanvasH'), canvas.height);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, entropyTex);
+  gl.uniform1i(uEntropyLocs.uCellColors, 0);
+  gl.uniform2i(uEntropyLocs.uGrid,       WIDTH, HEIGHT);
+  gl.uniform1i(uEntropyLocs.uCanvasH,    canvas.height);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
@@ -1175,15 +1228,25 @@ function updateRewindUI() {
 }
 
 // ── Animation loop ───────────────────────────────────────────────────────────
+const SPEED_MAX = parseInt(document.getElementById('speed').max, 10);
+
+function isUnlimited() {
+  return parseInt(document.getElementById('speed').value, 10) >= SPEED_MAX;
+}
+
 function loop() {
   if (!running) return;
   if (USE_WORKERS) {
-    // Async path: only yields inside dispatchPairs while workers run.
     loopAsync().then(() => { if (running) animId = requestAnimationFrame(loop); });
   } else {
-    // Sync path: tight loop, zero microtask overhead between epochs.
     const epf = parseInt(document.getElementById('speed').value, 10);
-    for (let i = 0; i < epf; i++) { runEpochSync(); takeSnapshot(); }
+    if (epf >= SPEED_MAX) {
+      // Unlimited: run epochs for the full frame budget, no fixed count.
+      const deadline = performance.now() + 14;
+      while (performance.now() < deadline) { runEpochSync(); takeSnapshot(); }
+    } else {
+      for (let i = 0; i < epf; i++) { runEpochSync(); takeSnapshot(); }
+    }
     render();
     updateStats();
     animId = requestAnimationFrame(loop);
@@ -1192,7 +1255,13 @@ function loop() {
 
 async function loopAsync() {
   const epf = parseInt(document.getElementById('speed').value, 10);
-  for (let i = 0; i < epf; i++) { await runEpochAsync(); takeSnapshot(); }
+  if (epf >= SPEED_MAX) {
+    // Unlimited: run epochs until ~14ms elapsed (workers run in parallel).
+    const deadline = performance.now() + 14;
+    while (performance.now() < deadline) { await runEpochAsync(); takeSnapshot(); }
+  } else {
+    for (let i = 0; i < epf; i++) { await runEpochAsync(); takeSnapshot(); }
+  }
   render();
   updateStats();
 }
@@ -1321,11 +1390,17 @@ canvas.addEventListener('dblclick', e => {
 document.getElementById('btnCopyCell').addEventListener('click', () => {
   if (pinnedCell < 0) return;
   const base = pinnedCell * TAPE_SIZE;
-  enterPasteMode(programs.subarray(base, base + TAPE_SIZE));
+  const tape = programs.subarray(base, base + TAPE_SIZE);
+  enterPasteMode(tape);
+
+  // Also write to system clipboard as base64 so it can be saved and re-applied later.
+  const b64 = btoa(String.fromCharCode(...tape));
+  navigator.clipboard?.writeText('alife:' + b64).catch(() => {});
+
   pinnedCell = -1;
   zoomEl.classList.remove('pinned');
   zoomEl.style.display = 'none';
-  showToast('Program copied — click a cell to paste');
+  showToast('Copied — click cell to paste  ·  V = paste from clipboard');
 });
 
 document.getElementById('btnEditCell').addEventListener('click', () => {
@@ -1431,7 +1506,9 @@ document.getElementById('btnReset').addEventListener('click', () => {
 });
 
 document.getElementById('speed').addEventListener('input', function () {
-  document.getElementById('speedVal').textContent = this.value + ' ep/f';
+  const v = parseInt(this.value, 10);
+  document.getElementById('speedVal').textContent =
+    v >= SPEED_MAX ? '∞' : v + ' ep/f';
 });
 
 document.getElementById('mutRate').addEventListener('input', function () {
@@ -1508,6 +1585,17 @@ document.addEventListener('keydown', e => {
   if (e.key === 'r' || e.key === 'R') {
     document.getElementById('btnReset').click();
   }
+  if (e.key === 'v' || e.key === 'V') {
+    navigator.clipboard?.readText().then(text => {
+      if (!text.startsWith('alife:')) { showToast('No alife program in clipboard'); return; }
+      try {
+        const bytes = Uint8Array.from(atob(text.slice(6)), c => c.charCodeAt(0));
+        if (bytes.length !== TAPE_SIZE) throw new Error();
+        enterPasteMode(bytes);
+        showToast('Loaded from clipboard — click a cell to paste');
+      } catch { showToast('Invalid clipboard data'); }
+    }).catch(() => showToast('Clipboard read denied'));
+  }
 });
 
 // ── Legend ────────────────────────────────────────────────────────────────────
@@ -1528,7 +1616,7 @@ legendEl.appendChild(dataDiv);
 if (!isEmbed) {
   const hint = document.createElement('div');
   hint.style.cssText = 'font-size:10px;color:#333;margin-top:4px;text-align:center;';
-  hint.textContent = 'Space=pause  →=step  E=entropy  R=reset  click=pin cell  dblclick=edit';
+  hint.textContent = 'Space=pause  →=step  E=entropy  R=reset  click=pin  dblclick=edit  V=paste from clipboard';
   document.getElementById('legend').after(hint);
 }
 
