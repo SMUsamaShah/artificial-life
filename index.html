@@ -304,6 +304,22 @@
     }
   </style>
 </head>
+<script>
+// Register service worker that adds COOP/COEP headers (required for SharedArrayBuffer).
+// On first run the SW installs, then we reload so the headers take effect.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').then(reg => {
+    if (!crossOriginIsolated) {
+      // SW just became active or was already registered but headers weren't applied yet.
+      reg.installing
+        ? reg.installing.addEventListener('statechange', e => {
+            if (e.target.state === 'activated') location.reload();
+          })
+        : location.reload();
+    }
+  }).catch(() => {}); // silently ignore if serving from file:// etc.
+}
+</script>
 <body>
 
 <header id="hdr">
@@ -409,6 +425,16 @@
 (() => {
 'use strict';
 
+// ── Feature flags ─────────────────────────────────────────────────────────────
+// Workers + SharedArrayBuffer require crossOriginIsolated (set by sw.js headers).
+const USE_WORKERS = crossOriginIsolated &&
+                    typeof SharedArrayBuffer !== 'undefined' &&
+                    navigator.hardwareConcurrency > 1;
+const NUM_WORKERS = USE_WORKERS ? Math.max(1, navigator.hardwareConcurrency - 1) : 0;
+
+// Sentinel for Uint16 neighbor/proposal arrays (replaces -1).
+const NO_NEIGHBOR = 0xFFFF;
+
 // ── Opcodes (ASCII) ──────────────────────────────────────────────────────────
 const LT     = 60;   // <
 const GT     = 62;   // >
@@ -491,6 +517,12 @@ let perfFrames = 0;
 let perfT0     = 0;
 let lastPairCount = 0;
 
+// ── Worker pool (parallel pair execution) ─────────────────────────────────────
+let workers    = [];   // Worker instances
+let programsSAB, pairsSAB, ctrlSAB;
+let ctrl32;            // Int32Array view of ctrlSAB
+// ctrl32 layout: [0]=GEN, [1]=PAIR_COUNT, [2]=DONE
+
 // ── History / snapshot state ─────────────────────────────────────────────────
 const SNAPSHOT_EVERY = 10;
 const MAX_SNAPSHOTS  = 60;
@@ -572,17 +604,35 @@ function init() {
   const seedVal = (parseInt(document.getElementById('seed').value, 10) || 1) >>> 0;
   rng = makePRNG(seedVal);
 
-  programs       = new Uint8Array(N * TAPE_SIZE);
-  neighbors      = new Int32Array(N * 24).fill(-1);
-  neighborCounts = new Int32Array(N);
-  proposals      = new Int32Array(N);
-  orderBuf       = new Int32Array(N);
-  pairsBuf       = new Int32Array(N);
+  teardownWorkers();
+
+  // Allocate programs + pairsBuf in SharedArrayBuffer when workers are available
+  // so workers can read/write without copying.  Fall back to plain TypedArrays.
+  if (USE_WORKERS) {
+    programsSAB = new SharedArrayBuffer(N * TAPE_SIZE);
+    pairsSAB    = new SharedArrayBuffer(N * 2);           // Uint16, N entries (N/2 pairs max)
+    ctrlSAB     = new SharedArrayBuffer(3 * 4);           // 3 × Int32
+    ctrl32      = new Int32Array(ctrlSAB);
+    programs    = new Uint8Array(programsSAB);
+    pairsBuf    = new Uint16Array(pairsSAB);
+  } else {
+    programs = new Uint8Array(N * TAPE_SIZE);
+    pairsBuf = new Uint16Array(N);
+  }
+
+  // Index arrays stay on main thread — Uint16/Uint8 halves memory vs Int32.
+  // N ≤ 32400 < 65535 so Uint16 can hold all cell indices.
+  neighbors      = new Uint16Array(N * 24).fill(NO_NEIGHBOR);
+  neighborCounts = new Uint8Array(N);
+  proposals      = new Uint16Array(N);
+  orderBuf       = new Uint16Array(N);
   takenBuf       = new Uint8Array(N);
-  concatTape     = new Uint8Array(TAPE_SIZE * 2);
+  concatTape     = new Uint8Array(TAPE_SIZE * 2);  // fallback path only
 
   for (let i = 0; i < programs.length; i++) programs[i] = (rng() * 256) | 0;
   buildNeighborhood();
+
+  if (USE_WORKERS) spawnWorkers();
 
   epoch = 0; perfEpochs = 0; perfFrames = 0; perfT0 = performance.now(); lastPairCount = 0;
   snapshots = []; histEntropy = []; histUnique = [];
@@ -590,15 +640,131 @@ function init() {
   cancelPasteMode();
 
   resizeCanvas();
+  setupGL();
+  createGLTextures();
   render();
   updateStats();
   updateRewindUI();
   renderGraph();
 }
 
-// ── Canvas sizing ────────────────────────────────────────────────────────────
+// ── Canvas / renderer setup ───────────────────────────────────────────────────
 const canvas = document.getElementById('canvas');
-const ctx    = canvas.getContext('2d', { alpha: false });
+const gl     = canvas.getContext('webgl2');
+const USE_GL = !!gl;
+// 2D context used as fallback and for zoom panel parent
+let ctx = null;
+if (!USE_GL) ctx = canvas.getContext('2d', { alpha: false });
+
+// ── WebGL2 renderer ───────────────────────────────────────────────────────────
+let glNormalProg = null, glEntropyProg = null;
+let programsTex  = null, lutTex = null, entropyTex = null;
+let glInited     = false;
+
+const VERT_SRC = `#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const FRAG_NORMAL_SRC = `#version 300 es
+precision mediump float;
+uniform sampler2D uPrograms;
+uniform sampler2D uLut;
+uniform ivec2 uGrid;
+uniform int uCanvasH;
+out vec4 fragColor;
+void main() {
+  int px = int(gl_FragCoord.x);
+  int py = uCanvasH - 1 - int(gl_FragCoord.y);
+  int cellIdx = (px / 8) * uGrid.y + (py / 8);
+  int byteIdx = (py % 8) * 8 + (px % 8);
+  float v = texelFetch(uPrograms, ivec2(byteIdx, cellIdx), 0).r;
+  int b = int(v * 255.0 + 0.5);
+  fragColor = texelFetch(uLut, ivec2(b, 0), 0);
+}`;
+
+const FRAG_ENTROPY_SRC = `#version 300 es
+precision mediump float;
+uniform sampler2D uCellColors;
+uniform ivec2 uGrid;
+uniform int uCanvasH;
+out vec4 fragColor;
+void main() {
+  int px = int(gl_FragCoord.x);
+  int py = uCanvasH - 1 - int(gl_FragCoord.y);
+  int cellIdx = (px / 8) * uGrid.y + (py / 8);
+  fragColor = texelFetch(uCellColors, ivec2(cellIdx, 0), 0);
+}`;
+
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+function linkProgram(vert, frag) {
+  const p = gl.createProgram();
+  gl.attachShader(p, vert);
+  gl.attachShader(p, frag);
+  gl.linkProgram(p);
+  return p;
+}
+function setupGL() {
+  if (!USE_GL || glInited) return;
+  glInited = true;
+
+  const vert = compileShader(gl.VERTEX_SHADER, VERT_SRC);
+  glNormalProg  = linkProgram(vert, compileShader(gl.FRAGMENT_SHADER, FRAG_NORMAL_SRC));
+  glEntropyProg = linkProgram(vert, compileShader(gl.FRAGMENT_SHADER, FRAG_ENTROPY_SRC));
+
+  // Full-screen quad
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  [glNormalProg, glEntropyProg].forEach(p => {
+    gl.useProgram(p);
+    const loc = gl.getAttribLocation(p, 'aPos');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  });
+
+  // Color LUT texture (256×1 RGBA8): maps byte value → color
+  const lutData = new Uint8Array(256 * 4).fill(20);
+  lutData.fill(255, 3); // alpha = 255
+  for (let i = 3; i < lutData.length; i += 4) lutData[i] = 255;
+  OPCODE_TOKENS.forEach((tok, i) => {
+    lutData[tok * 4    ] = PALETTE[i][0];
+    lutData[tok * 4 + 1] = PALETTE[i][1];
+    lutData[tok * 4 + 2] = PALETTE[i][2];
+    lutData[tok * 4 + 3] = 255;
+  });
+  lutTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, lutTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, lutData);
+}
+
+function createGLTextures() {
+  if (!USE_GL) return;
+
+  // programs texture: R8 UNORM, width=TAPE_SIZE(64), height=N
+  if (programsTex) gl.deleteTexture(programsTex);
+  programsTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, programsTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, TAPE_SIZE, N, 0, gl.RED, gl.UNSIGNED_BYTE, programs);
+
+  // per-cell entropy color texture: RGBA8, width=N, height=1
+  if (entropyTex) gl.deleteTexture(entropyTex);
+  entropyTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, entropyTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, N, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+}
 
 function resizeCanvas() {
   canvas.width  = WIDTH  * 8;
@@ -607,6 +773,8 @@ function resizeCanvas() {
   const scale = Math.min(1, maxW / canvas.width);
   canvas.style.width  = (canvas.width  * scale) + 'px';
   canvas.style.height = (canvas.height * scale) + 'px';
+
+  if (USE_GL) gl.viewport(0, 0, canvas.width, canvas.height);
 
   const gw = Math.min(600, Math.round(canvas.width * scale));
   const graphCanvas = document.getElementById('graphCanvas');
@@ -707,24 +875,60 @@ function runTape(tape) {
   }
 }
 
+// ── Worker pool helpers ───────────────────────────────────────────────────────
+function spawnWorkers() {
+  workers = [];
+  for (let id = 0; id < NUM_WORKERS; id++) {
+    const w = new Worker('./worker.js');
+    w.postMessage({ programsSAB, pairsSAB, ctrlSAB, workerId: id, numWorkers: NUM_WORKERS });
+    workers.push(w);
+  }
+}
+
+function teardownWorkers() {
+  if (workers.length === 0) return;
+  // Send stop signal (GEN = -1) so workers exit their loop.
+  if (ctrl32) {
+    Atomics.store(ctrl32, 0, -1);
+    Atomics.notify(ctrl32, 0, Infinity);
+  }
+  workers.forEach(w => w.terminate());
+  workers = [];
+}
+
+async function dispatchPairs(pairCount) {
+  Atomics.store(ctrl32, 2, 0);           // reset DONE counter
+  Atomics.store(ctrl32, 1, pairCount);   // write pair count
+  Atomics.add(ctrl32, 0, 1);             // increment GEN — wakes all workers
+  Atomics.notify(ctrl32, 0, Infinity);
+
+  // Wait for all workers to finish.
+  while (Atomics.load(ctrl32, 2) < NUM_WORKERS) {
+    await Atomics.waitAsync(ctrl32, 2, Atomics.load(ctrl32, 2)).value;
+  }
+}
+
 // ── One epoch ────────────────────────────────────────────────────────────────
-function runEpoch() {
+async function runEpoch() {
+  // ① Shuffle (sequential — single RNG stream preserves snapshot replay)
   for (let i = 0; i < N; i++) orderBuf[i] = i;
   for (let i = N - 1; i > 0; i--) {
     const j = (rng() * (i + 1)) | 0;
     const tmp = orderBuf[i]; orderBuf[i] = orderBuf[j]; orderBuf[j] = tmp;
   }
 
+  // ② Propose neighbors (sequential — uses RNG)
   for (let i = 0; i < N; i++) {
     const cnt = neighborCounts[i];
-    proposals[i] = cnt > 0 ? neighbors[i * 24 + ((rng() * cnt) | 0)] : -1;
+    proposals[i] = cnt > 0 ? neighbors[i * 24 + ((rng() * cnt) | 0)] : NO_NEIGHBOR;
   }
 
+  // ③ Pair matching (sequential — takenBuf has read-write dependency chain)
   takenBuf.fill(0);
   let pairCount = 0;
   for (let i = 0; i < N; i++) {
     const p = orderBuf[i], n = proposals[p];
-    if (n < 0 || takenBuf[p] || takenBuf[n]) continue;
+    if (n === NO_NEIGHBOR || takenBuf[p] || takenBuf[n]) continue;
     takenBuf[p] = takenBuf[n] = 1;
     pairsBuf[pairCount * 2    ] = p;
     pairsBuf[pairCount * 2 + 1] = n;
@@ -732,16 +936,22 @@ function runEpoch() {
   }
   lastPairCount = pairCount;
 
-  for (let pi = 0; pi < pairCount; pi++) {
-    const idxA = pairsBuf[pi * 2], idxB = pairsBuf[pi * 2 + 1];
-    const baseA = idxA * TAPE_SIZE, baseB = idxB * TAPE_SIZE;
-    concatTape.set(programs.subarray(baseA, baseA + TAPE_SIZE), 0);
-    concatTape.set(programs.subarray(baseB, baseB + TAPE_SIZE), TAPE_SIZE);
-    runTape(concatTape);
-    programs.set(concatTape.subarray(0, TAPE_SIZE), baseA);
-    programs.set(concatTape.subarray(TAPE_SIZE),    baseB);
+  // ④ Execute pairs — embarrassingly parallel (each pair touches disjoint cells)
+  if (USE_WORKERS && pairCount > 0) {
+    await dispatchPairs(pairCount);
+  } else {
+    for (let pi = 0; pi < pairCount; pi++) {
+      const idxA = pairsBuf[pi * 2], idxB = pairsBuf[pi * 2 + 1];
+      const baseA = idxA * TAPE_SIZE, baseB = idxB * TAPE_SIZE;
+      concatTape.set(programs.subarray(baseA, baseA + TAPE_SIZE), 0);
+      concatTape.set(programs.subarray(baseB, baseB + TAPE_SIZE), TAPE_SIZE);
+      runTape(concatTape);
+      programs.set(concatTape.subarray(0, TAPE_SIZE), baseA);
+      programs.set(concatTape.subarray(TAPE_SIZE),    baseB);
+    }
   }
 
+  // ⑤ Mutation (sequential — uses RNG)
   const mutRate = parseInt(document.getElementById('mutRate').value, 10) / 100000;
   if (mutRate > 0) {
     const expected = programs.length * mutRate;
@@ -766,16 +976,61 @@ function runEpoch() {
 let imageData = null;
 
 function render() {
-  if (!imageData || imageData.width !== canvas.width || imageData.height !== canvas.height) {
-    imageData = ctx.createImageData(canvas.width, canvas.height);
-    const d = imageData.data;
-    for (let i = 3; i < d.length; i += 4) d[i] = 255;
+  if (USE_GL) {
+    renderMode === 'entropy' ? renderEntropyGL() : renderNormalGL();
+  } else {
+    if (!imageData || imageData.width !== canvas.width || imageData.height !== canvas.height) {
+      imageData = ctx.createImageData(canvas.width, canvas.height);
+      const d = imageData.data;
+      for (let i = 3; i < d.length; i += 4) d[i] = 255;
+    }
+    renderMode === 'entropy' ? renderEntropyCPU() : renderNormalCPU();
   }
-  renderMode === 'entropy' ? renderEntropy() : renderNormal();
   perfFrames++;
 }
 
-function renderNormal() {
+// ── WebGL render paths ────────────────────────────────────────────────────────
+function renderNormalGL() {
+  // Upload programs to GPU texture (CPU→GPU: ~2MB for full grid, fast on modern hw)
+  gl.bindTexture(gl.TEXTURE_2D, programsTex);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TAPE_SIZE, N, gl.RED, gl.UNSIGNED_BYTE, programs);
+
+  gl.useProgram(glNormalProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, programsTex);
+  gl.uniform1i(gl.getUniformLocation(glNormalProg, 'uPrograms'), 0);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, lutTex);
+  gl.uniform1i(gl.getUniformLocation(glNormalProg, 'uLut'), 1);
+  gl.uniform2i(gl.getUniformLocation(glNormalProg, 'uGrid'), WIDTH, HEIGHT);
+  gl.uniform1i(gl.getUniformLocation(glNormalProg, 'uCanvasH'), canvas.height);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+function renderEntropyGL() {
+  // Compute per-cell entropy on CPU, upload as RGBA8 color texture
+  const colors = new Uint8Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    const [r, g, b] = entropyToRgb(tapeEntropy(i * TAPE_SIZE));
+    colors[i * 4    ] = r;
+    colors[i * 4 + 1] = g;
+    colors[i * 4 + 2] = b;
+    colors[i * 4 + 3] = 255;
+  }
+  gl.bindTexture(gl.TEXTURE_2D, entropyTex);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, N, 1, gl.RGBA, gl.UNSIGNED_BYTE, colors);
+
+  gl.useProgram(glEntropyProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, entropyTex);
+  gl.uniform1i(gl.getUniformLocation(glEntropyProg, 'uCellColors'), 0);
+  gl.uniform2i(gl.getUniformLocation(glEntropyProg, 'uGrid'), WIDTH, HEIGHT);
+  gl.uniform1i(gl.getUniformLocation(glEntropyProg, 'uCanvasH'), canvas.height);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ── Canvas 2D fallback paths ──────────────────────────────────────────────────
+function renderNormalCPU() {
   const pix = imageData.data;
   const cw8 = canvas.width;
   for (let x = 0; x < WIDTH; x++) {
@@ -799,7 +1054,7 @@ function renderNormal() {
   ctx.putImageData(imageData, 0, 0);
 }
 
-function renderEntropy() {
+function renderEntropyCPU() {
   const pix = imageData.data;
   const cw8 = canvas.width;
   for (let x = 0; x < WIDTH; x++) {
@@ -912,11 +1167,16 @@ function updateRewindUI() {
 // ── Animation loop ───────────────────────────────────────────────────────────
 function loop() {
   if (!running) return;
+  loopAsync().then(() => {
+    if (running) animId = requestAnimationFrame(loop);
+  });
+}
+
+async function loopAsync() {
   const epf = parseInt(document.getElementById('speed').value, 10);
-  for (let i = 0; i < epf; i++) { runEpoch(); takeSnapshot(); }
+  for (let i = 0; i < epf; i++) { await runEpoch(); takeSnapshot(); }
   render();
   updateStats();
-  animId = requestAnimationFrame(loop);
 }
 
 // ── Zoom panel helpers ───────────────────────────────────────────────────────
@@ -1138,9 +1398,9 @@ function pauseSim() {
 
 btnToggle.addEventListener('click', () => running ? pauseSim() : startSim());
 
-document.getElementById('btnStep').addEventListener('click', () => {
+document.getElementById('btnStep').addEventListener('click', async () => {
   if (running) return;
-  runEpoch();
+  await runEpoch();
   takeSnapshot();
   render();
   updateStats();
@@ -1224,7 +1484,7 @@ document.addEventListener('keydown', e => {
     running ? pauseSim() : startSim();
   }
   if (e.key === 'ArrowRight' && !running) {
-    runEpoch(); takeSnapshot(); render(); updateStats(); updateRewindUI();
+    runEpoch().then(() => { takeSnapshot(); render(); updateStats(); updateRewindUI(); });
   }
   if (e.key === 'e' || e.key === 'E') {
     document.getElementById('btnEntropy').click();
@@ -1258,8 +1518,12 @@ if (!isEmbed) {
 
 // ── Kick off ──────────────────────────────────────────────────────────────────
 window.addEventListener('resize', resizeCanvas);
+window.addEventListener('unload', teardownWorkers);
 readHash();
 init();
+
+// Show worker/GL status in console for diagnostics
+console.log(`[alife] crossOriginIsolated=${crossOriginIsolated} USE_WORKERS=${USE_WORKERS} workers=${NUM_WORKERS} USE_GL=${USE_GL}`);
 
 })();
 </script>
