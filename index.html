@@ -308,7 +308,7 @@
 // Register service worker that adds COOP/COEP headers (required for SharedArrayBuffer).
 // On first run the SW installs, then we reload so the headers take effect.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js').then(reg => {
+  navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(reg => {
     if (!crossOriginIsolated) {
       // SW just became active or was already registered but headers weren't applied yet.
       reg.installing
