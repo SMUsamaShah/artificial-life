@@ -755,7 +755,6 @@ function setupGL() {
 
   // Color LUT texture (256×1 RGBA8): maps byte value → color
   const lutData = new Uint8Array(256 * 4).fill(20);
-  lutData.fill(255, 3); // alpha = 255
   for (let i = 3; i < lutData.length; i += 4) lutData[i] = 255;
   OPCODE_TOKENS.forEach((tok, i) => {
     lutData[tok * 4    ] = PALETTE[i][0];
