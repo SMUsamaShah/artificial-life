@@ -116,8 +116,8 @@
   </div>
   <div class="cg">
     <label>Speed:</label>
-    <input type="range" id="speedSlider" min="1" max="20" value="1">
-    <span id="speedVal">1 ep/frame</span>
+    <input type="range" id="speedSlider" min="1" max="20" value="20">
+    <span id="speedVal">Max</span>
   </div>
   <div class="cg">
     <label>Mutation:</label>
@@ -295,8 +295,11 @@ function runEpoch() {
 }
 
 // ── Simulation control ────────────────────────────────────────────────────────
-let running   = false;
-let batchSize = 1;   // epochs per postMessage cycle
+let running      = false;
+// targetMs = 0  → max speed (time-sliced: ~50ms of work per event-loop task)
+// targetMs > 0  → slowed mode (1 epoch then wait targetMs ms before next)
+let targetMs     = 0;
+let lastSendTime = 0;   // throttle: avoid flooding main thread with postMessages
 
 function initSim(seed) {
   rng   = makePRNG(seed >>> 0);
@@ -305,16 +308,29 @@ function initSim(seed) {
 }
 
 function sendState() {
-  // Send a copy of programs so worker can keep mutating its own buffer
+  // Copy programs so the worker keeps its own buffer and can continue mutating
   self.postMessage({ epoch, programs: programs.slice() });
+  lastSendTime = performance.now();
 }
 
 function loop() {
   if (!running) return;
-  for (let i = 0; i < batchSize; i++) runEpoch();
-  sendState();
-  // yield to event loop so incoming messages are processed between batches
-  setTimeout(loop, 0);
+
+  if (targetMs === 0) {
+    // ── MAX SPEED: fill a ~50ms time slice without yielding ──────────────────
+    // Gives ~92% CPU utilisation (50ms work / ~54ms including setTimeout yield).
+    // Far better than one epoch per setTimeout which wastes the 4ms minimum delay.
+    const deadline = performance.now() + 50;
+    do { runEpoch(); } while (running && performance.now() < deadline);
+  } else {
+    // ── SLOWED: one epoch then wait ──────────────────────────────────────────
+    runEpoch();
+  }
+
+  // Throttle renders: don't flood the main thread faster than ~20 msgs/sec
+  if (performance.now() - lastSendTime >= 50) sendState();
+
+  if (running) setTimeout(loop, targetMs);
 }
 
 self.onmessage = function(e) {
@@ -330,6 +346,7 @@ self.onmessage = function(e) {
       break;
     case 'pause':
       running = false;
+      sendState();   // flush last state so UI updates immediately on pause
       break;
     case 'step':
       running = false;
@@ -339,15 +356,18 @@ self.onmessage = function(e) {
     case 'setMut':
       mutRate = d.value;
       break;
-    case 'setBatch':
-      batchSize = d.value;
+    case 'setSpeed':
+      // targetMs = 0 → max speed; > 0 → ms delay between single epochs
+      targetMs = d.value;
       break;
   }
 };
 
-// Auto-start on creation; main thread can pause/reset as needed
+// Auto-start: initialise and begin running immediately
 initSim(1);
 sendState();
+running = true;
+loop();
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -520,12 +540,32 @@ function opcodePercent(programs) {
   return 100 * n / programs.length;
 }
 
+// Rolling epoch-rate estimator (uses a sliding ~2s window of samples)
+const rateSamples = [];  // [{epoch, t}]
+function recordEpoch(ep) {
+  const now = performance.now();
+  rateSamples.push({ epoch: ep, t: now });
+  // Keep only the last 2 seconds worth
+  while (rateSamples.length > 1 && now - rateSamples[0].t > 2000) rateSamples.shift();
+}
+function epochsPerDay() {
+  if (rateSamples.length < 2) return 0;
+  const a = rateSamples[0], b = rateSamples[rateSamples.length - 1];
+  const dt = (b.t - a.t) / 1000;   // seconds
+  if (dt < 0.1) return 0;
+  return (b.epoch - a.epoch) / dt * 86400;
+}
+function fmtRate(epd) {
+  if (epd <= 0) return '—';
+  if (epd >= 1e9) return (epd / 1e9).toFixed(2) + 'B ep/day';
+  if (epd >= 1e6) return (epd / 1e6).toFixed(2) + 'M ep/day';
+  if (epd >= 1e3) return (epd / 1e3).toFixed(1) + 'K ep/day';
+  return Math.round(epd) + ' ep/day';
+}
+
 // ── Render loop  (decoupled from simulation speed) ────────────────────────────
-const statsEl  = document.getElementById('stats');
-let lastRender = null;
-let fps        = 0;
-let fpsCount   = 0;
-let fpsTimer   = performance.now();
+const statsEl = document.getElementById('stats');
+let fps = 0, fpsCount = 0, fpsTimer = performance.now();
 
 function frame() {
   if (latestPrograms) {
@@ -535,23 +575,25 @@ function frame() {
     fpsCount++;
     const now = performance.now();
     if (now - fpsTimer >= 1000) {
-      fps      = Math.round(fpsCount * 1000 / (now - fpsTimer));
+      fps = Math.round(fpsCount * 1000 / (now - fpsTimer));
       fpsCount = 0;
       fpsTimer = now;
     }
 
+    recordEpoch(latestEpoch);
     const pct = opcodePercent(latestPrograms).toFixed(2);
     statsEl.textContent =
-      `epoch ${latestEpoch.toLocaleString()} | opcode density ${pct}% | ${fps} fps | ${GRID_W}\u00d7${GRID_H} grid`;
+      `epoch ${latestEpoch.toLocaleString()} \u2502 `+
+      `opcode ${pct}% \u2502 `+
+      `${fmtRate(epochsPerDay())} \u2502 `+
+      `${fps} fps`;
 
-    lastRender = latestPrograms;
     latestPrograms = null;   // mark consumed; next message will set a new one
   }
   requestAnimationFrame(frame);
 }
 
-// Start worker running, then kick off render loop
-worker.postMessage({ cmd: 'start' });
+// Kick off render loop; worker auto-starts in its own init code
 requestAnimationFrame(frame);
 
 // ── UI controls ───────────────────────────────────────────────────────────────
@@ -578,7 +620,9 @@ document.getElementById('btnReset').addEventListener('click', () => {
   const seed = parseInt(document.getElementById('seedInput').value, 10) || 1;
   paused = false;
   btnPlay.innerHTML = '&#9646;&#9646; Pause';
+  rateSamples.length = 0;   // reset rate estimator so ep/day doesn't show stale data
   worker.postMessage({ cmd: 'init', seed });
+  // init stops the loop; restart it
   worker.postMessage({ cmd: 'start' });
 });
 
@@ -586,13 +630,24 @@ document.getElementById('btnApplySeed').addEventListener('click', () => {
   document.getElementById('btnReset').click();
 });
 
+// Speed slider: position 20 = max (no delay), 1-19 = exponentially spaced delays.
+// At position v: delay ≈ 1500 / 2^((v-1)*7/18) ms  →  ~1500ms at v=1, ~14ms at v=19.
+// Browsers clamp setTimeout to ≥4ms, so positions 17-19 all feel "near-max".
+function sliderToDelayMs(v) {
+  if (v >= 20) return 0;                                  // 0 = max speed (time-sliced)
+  return Math.max(4, Math.round(1500 / Math.pow(2, (v - 1) * 7 / 18)));
+}
+
 const speedSlider = document.getElementById('speedSlider');
 const speedValEl  = document.getElementById('speedVal');
 speedSlider.addEventListener('input', function() {
-  const v = parseInt(this.value, 10);
-  speedValEl.textContent = v + (v === 1 ? ' ep/frame' : ' ep/frame');
-  worker.postMessage({ cmd: 'setBatch', value: v });
+  const v   = parseInt(this.value, 10);
+  const ms  = sliderToDelayMs(v);
+  speedValEl.textContent = ms === 0 ? 'Max' : '~' + Math.round(1000 / Math.max(ms, 4)) + ' ep/s';
+  worker.postMessage({ cmd: 'setSpeed', value: ms });
 });
+// Initialise worker speed to match default slider position (20 = Max)
+worker.postMessage({ cmd: 'setSpeed', value: 0 });
 
 const mutSlider = document.getElementById('mutSlider');
 const mutValEl  = document.getElementById('mutVal');
