@@ -814,7 +814,7 @@ function createGLTextures() {
 function resizeCanvas() {
   canvas.width  = WIDTH  * 8;
   canvas.height = HEIGHT * 8;
-  const maxW  = Math.min(window.innerWidth - 16, 1280);
+  const maxW  = window.innerWidth - 16;
   const scale = Math.min(1, maxW / canvas.width);
   canvas.style.width  = (canvas.width  * scale) + 'px';
   canvas.style.height = (canvas.height * scale) + 'px';
