@@ -568,7 +568,8 @@ function readHash() {
   if (p.has('speed')) {
     const v = p.get('speed');
     document.getElementById('speed').value = v;
-    document.getElementById('speedVal').textContent = v + ' ep/f';
+    document.getElementById('speedVal').textContent =
+      parseInt(v, 10) >= SPEED_MAX ? '∞' : v + ' ep/f';
   }
   if (p.has('mut')) {
     const v = p.get('mut');
