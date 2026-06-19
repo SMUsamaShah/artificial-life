@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Artificial Life</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0e0e0e;
+      color: #ddd;
+      font-family: 'Courier New', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 14px;
+      min-height: 100vh;
+    }
+    h1 {
+      font-size: 1.3rem;
+      letter-spacing: 0.04em;
+      margin-bottom: 3px;
+    }
+    .subtitle {
+      font-size: 0.74rem;
+      color: #666;
+      text-align: center;
+      line-height: 1.7;
+      margin-bottom: 10px;
+    }
+    .subtitle a { color: #505060; text-decoration: none; }
+    .subtitle a:hover { color: #888; }
+    #canvas {
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      max-width: min(100vw - 28px, 1280px);
+      height: auto;
+      border: 1px solid #222;
+    }
+    #stats {
+      font-size: 0.72rem;
+      color: #666;
+      margin: 7px 0 5px;
+      text-align: center;
+      min-height: 1.1em;
+    }
+    #controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px 16px;
+      margin: 6px 0 8px;
+      align-items: center;
+      justify-content: center;
+    }
+    .cg {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.74rem;
+      color: #999;
+    }
+    button {
+      background: #1e1e1e;
+      color: #ccc;
+      border: 1px solid #333;
+      padding: 4px 10px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.74rem;
+      border-radius: 3px;
+    }
+    button:hover { background: #282828; border-color: #4a4a4a; }
+    input[type=range] { width: 80px; cursor: pointer; accent-color: #446; }
+    input[type=number] {
+      width: 52px;
+      background: #181818;
+      color: #ccc;
+      border: 1px solid #333;
+      padding: 3px 5px;
+      font-family: inherit;
+      font-size: 0.74rem;
+      border-radius: 3px;
+    }
+    #legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px 11px;
+      font-size: 0.68rem;
+      color: #555;
+      justify-content: center;
+      max-width: 600px;
+    }
+    .li { display: flex; align-items: center; gap: 4px; }
+    .sw { width: 9px; height: 9px; border-radius: 1px; flex-shrink: 0; }
+  </style>
+</head>
+<body>
+
+<h1>Artificial Life <span style="font-size:0.5em;color:#444;font-weight:normal">v1.3</span></h1>
+<p class="subtitle">
+  240&times;135 grid of self-modifying programs (32&thinsp;400 programs, 64 bytes each).<br>
+  Each epoch: random neighbour pairs concatenate tapes, run up to 8&thinsp;192 steps, split back.<br>
+  <a href="https://arxiv.org/abs/2406.19108" target="_blank">Reproduction of "Computational Life" (arxiv:2406.19108)</a>
+</p>
+
+<div id="stats">Starting&hellip;</div>
+<canvas id="canvas"></canvas>
+
+<div id="controls">
+  <div class="cg">
+    <button id="btnPlay">&#9646;&#9646; Pause</button>
+    <button id="btnStep">Step</button>
+    <button id="btnReset">Reset</button>
+  </div>
+  <div class="cg">
+    <label>Speed:</label>
+    <input type="range" id="speedSlider" min="1" max="20" value="20">
+    <span id="speedVal">Max</span>
+  </div>
+  <div class="cg">
+    <label>Mutation:</label>
+    <input type="range" id="mutSlider" min="0" max="300" value="100">
+    <span id="mutVal">1.00&times;</span>
+  </div>
+  <div class="cg">
+    <label>Seed:</label>
+    <input type="number" id="seedInput" value="1" min="0" max="99999">
+    <button id="btnApplySeed">Apply</button>
+  </div>
+</div>
+
+<div id="legend"></div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     SINGLE-WORKER FALLBACK  (used when crossOriginIsolated = false)
+     Identical to v1.2 — runs entire simulation in one thread.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script type="text/plain" id="single-worker-src">
+'use strict';
+const GT=62,LT=60,RB=125,LB=123,PLUS=43,MINUS=45,DOT=46,COMMA=44,LBRACK=91,RBRACK=93;
+const GRID_W=240,GRID_H=135,N_PROG=GRID_W*GRID_H,TAPE=64,CONCAT=128,MAXITER=8192;
+const BASE_MUT=0.024/100.0;
+let programs=new Uint8Array(N_PROG*TAPE);
+
+function makePRNG(seed){
+  let s=(seed^0xDEADBEEF)>>>0;
+  function next(){s=(s+0x6D2B79F5)>>>0;let t=Math.imul(s^(s>>>15),s|1);t^=t+Math.imul(t^(t>>>7),t|61);return(t^(t>>>14))>>>0;}
+  return{int:n=>next()%n,fill:arr=>{for(let i=0;i<arr.length;i++)arr[i]=next()&0xFF;},shuffle:(arr,n)=>{for(let i=n-1;i>0;i--){const j=next()%(i+1);const t=arr[i];arr[i]=arr[j];arr[j]=t;}}};
+}
+let rng=makePRNG(1);
+
+const neighbors=new Int32Array(N_PROG*24),nCounts=new Int32Array(N_PROG);
+(function(){for(let gy=0;gy<GRID_H;gy++)for(let gx=0;gx<GRID_W;gx++){const idx=gy*GRID_W+gx,x0=Math.max(0,gx-2),x1=Math.min(GRID_W,gx+3),y0=Math.max(0,gy-2),y1=Math.min(GRID_H,gy+3);let c=0;for(let ny=y0;ny<y1;ny++)for(let nx=x0;nx<x1;nx++)if(nx!==gx||ny!==gy)neighbors[idx*24+c++]=ny*GRID_W+nx;nCounts[idx]=c;}})();
+
+const scratch=new Uint8Array(CONCAT),order=new Int32Array(N_PROG),proposals=new Int32Array(N_PROG),taken=new Uint8Array(N_PROG);
+
+function runTape(tape){
+  const len=CONCAT;let pc=0,h0=0,h1=0;
+  for(let it=0;it<MAXITER;it++){
+    if(pc>=len||pc<0)break;
+    const op=tape[pc];
+    switch(op){
+      case GT:h0=h0+1<len?h0+1:0;break;case LT:h0=h0>0?h0-1:len-1;break;
+      case RB:h1=h1+1<len?h1+1:0;break;case LB:h1=h1>0?h1-1:len-1;break;
+      case PLUS:tape[h0]=(tape[h0]+1)&0xFF;break;case MINUS:tape[h0]=tape[h0]>0?tape[h0]-1:255;break;
+      case DOT:tape[h1]=tape[h0];break;case COMMA:tape[h0]=tape[h1];break;
+      case LBRACK:if(tape[h0]===0){let d=1,j=pc;while(++j<len){if(tape[j]===LBRACK)d++;else if(tape[j]===RBRACK&&--d===0)break;}if(d!==0)return;pc=j;}break;
+      case RBRACK:if(tape[h0]!==0){let d=1,j=pc;while(--j>=0){if(tape[j]===RBRACK)d++;else if(tape[j]===LBRACK&&--d===0)break;}if(d!==0)return;pc=j;}break;
+    }
+    pc++;
+  }
+}
+
+let epoch=0,mutRate=BASE_MUT,running=false,targetMs=0,lastSendTime=0;
+
+function runEpoch(){
+  for(let i=0;i<N_PROG;i++)order[i]=i;
+  rng.shuffle(order,N_PROG);
+  for(let i=0;i<N_PROG;i++){const nc=nCounts[i];proposals[i]=nc>0?neighbors[i*24+rng.int(nc)]:-1;}
+  taken.fill(0);
+  for(let oi=0;oi<N_PROG;oi++){
+    const p=order[oi],n=proposals[p];
+    if(n<0||taken[p]||taken[n])continue;
+    taken[p]=taken[n]=1;
+    const pb=p*TAPE,nb=n*TAPE;
+    scratch.set(programs.subarray(pb,pb+TAPE),0);
+    scratch.set(programs.subarray(nb,nb+TAPE),TAPE);
+    runTape(scratch);
+    programs.set(scratch.subarray(0,TAPE),pb);
+    programs.set(scratch.subarray(TAPE),nb);
+  }
+  if(mutRate>0){const sz=programs.length,nm=Math.round(sz*mutRate);for(let i=0;i<nm;i++)programs[rng.int(sz)]=rng.int(256);}
+  epoch++;
+}
+
+function initSim(seed){rng=makePRNG(seed>>>0);epoch=0;rng.fill(programs);}
+function sendState(){self.postMessage({epoch,programs:programs.slice()});lastSendTime=performance.now();}
+
+function loop(){
+  if(!running)return;
+  if(targetMs===0){const dl=performance.now()+50;do{runEpoch();}while(running&&performance.now()<dl);}
+  else runEpoch();
+  if(performance.now()-lastSendTime>=50)sendState();
+  if(running)setTimeout(loop,targetMs);
+}
+
+self.onmessage=function(e){
+  const d=e.data;
+  switch(d.cmd){
+    case'init':running=false;initSim(d.seed??1);sendState();break;
+    case'start':if(!running){running=true;loop();}break;
+    case'pause':running=false;sendState();break;
+    case'step':running=false;runEpoch();sendState();break;
+    case'setMut':mutRate=d.value;break;
+    case'setSpeed':targetMs=d.value;break;
+  }
+};
+initSim(1);sendState();running=true;loop();
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     SIM WORKER  (multi-core mode only)
+     Each instance receives a SharedArrayBuffer slice of pairs and runs
+     brainfuck in-place.  No data copying — reads/writes shared programs SAB.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script type="text/plain" id="sim-worker-src">
+'use strict';
+const GT=62,LT=60,RB=125,LB=123,PLUS=43,MINUS=45,DOT=46,COMMA=44,LBRACK=91,RBRACK=93;
+const TAPE=64,CONCAT=128,MAXITER=8192;
+let programs;
+
+function runTape(tape){
+  const len=CONCAT;let pc=0,h0=0,h1=0;
+  for(let it=0;it<MAXITER;it++){
+    if(pc>=len||pc<0)break;
+    const op=tape[pc];
+    switch(op){
+      case GT:h0=h0+1<len?h0+1:0;break;case LT:h0=h0>0?h0-1:len-1;break;
+      case RB:h1=h1+1<len?h1+1:0;break;case LB:h1=h1>0?h1-1:len-1;break;
+      case PLUS:tape[h0]=(tape[h0]+1)&0xFF;break;case MINUS:tape[h0]=tape[h0]>0?tape[h0]-1:255;break;
+      case DOT:tape[h1]=tape[h0];break;case COMMA:tape[h0]=tape[h1];break;
+      case LBRACK:if(tape[h0]===0){let d=1,j=pc;while(++j<len){if(tape[j]===LBRACK)d++;else if(tape[j]===RBRACK&&--d===0)break;}if(d!==0)return;pc=j;}break;
+      case RBRACK:if(tape[h0]!==0){let d=1,j=pc;while(--j>=0){if(tape[j]===RBRACK)d++;else if(tape[j]===LBRACK&&--d===0)break;}if(d!==0)return;pc=j;}break;
+    }
+    pc++;
+  }
+}
+
+self.onmessage=function(e){
+  const d=e.data;
+  if(d.cmd==='init'){
+    programs=new Uint8Array(d.sab);
+    self.postMessage({cmd:'ready'});
+  } else if(d.cmd==='run'){
+    // pairs = Int32Array of [p0,n0, p1,n1, ...] — non-overlapping cell indices
+    const pairs=d.pairs;
+    const scratch=new Uint8Array(CONCAT);
+    for(let i=0;i<pairs.length;i+=2){
+      const p=pairs[i],n=pairs[i+1];
+      const pb=p*TAPE,nb=n*TAPE;
+      scratch.set(programs.subarray(pb,pb+TAPE),0);
+      scratch.set(programs.subarray(nb,nb+TAPE),TAPE);
+      runTape(scratch);
+      programs.set(scratch.subarray(0,TAPE),pb);
+      programs.set(scratch.subarray(TAPE),nb);
+    }
+    self.postMessage({cmd:'done'});
+  }
+};
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     COORDINATOR WORKER  (multi-core mode only)
+     Owns: PRNG, neighbourhood table, shuffle/proposals/pair-selection.
+     Delegates: brainfuck execution to N sim workers via shared programs SAB.
+     Never copies programs data — main thread reads SAB directly for render.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script type="text/plain" id="coordinator-src">
+'use strict';
+const GRID_W=240,GRID_H=135,N_PROG=GRID_W*GRID_H,TAPE=64;
+const BASE_MUT=0.024/100.0;
+
+let programs; // Uint8Array view of SharedArrayBuffer
+
+function makePRNG(seed){
+  let s=(seed^0xDEADBEEF)>>>0;
+  function next(){s=(s+0x6D2B79F5)>>>0;let t=Math.imul(s^(s>>>15),s|1);t^=t+Math.imul(t^(t>>>7),t|61);return(t^(t>>>14))>>>0;}
+  return{int:n=>next()%n,fill:arr=>{for(let i=0;i<arr.length;i++)arr[i]=next()&0xFF;},shuffle:(arr,n)=>{for(let i=n-1;i>0;i--){const j=next()%(i+1);const t=arr[i];arr[i]=arr[j];arr[j]=t;}}};
+}
+let rng=makePRNG(1);
+
+const neighbors=new Int32Array(N_PROG*24),nCounts=new Int32Array(N_PROG);
+(function(){for(let gy=0;gy<GRID_H;gy++)for(let gx=0;gx<GRID_W;gx++){const idx=gy*GRID_W+gx,x0=Math.max(0,gx-2),x1=Math.min(GRID_W,gx+3),y0=Math.max(0,gy-2),y1=Math.min(GRID_H,gy+3);let c=0;for(let ny=y0;ny<y1;ny++)for(let nx=x0;nx<x1;nx++)if(nx!==gx||ny!==gy)neighbors[idx*24+c++]=ny*GRID_W+nx;nCounts[idx]=c;}})();
+
+const order=new Int32Array(N_PROG),proposals=new Int32Array(N_PROG),taken=new Uint8Array(N_PROG);
+const pairsA=new Int32Array(N_PROG>>1),pairsB=new Int32Array(N_PROG>>1);
+
+// ── Sim worker pool ───────────────────────────────────────────────────────────
+let simWorkers=[],nWorkers=0,workersReady=0,pendingStart=false;
+let pendingDone=0,continueAfterWorkers=null;
+
+function initWorkers(sab,simSrc,n){
+  nWorkers=n;
+  const url=URL.createObjectURL(new Blob([simSrc],{type:'text/javascript'}));
+  for(let i=0;i<n;i++){
+    const w=new Worker(url);
+    w.onmessage=function(e){
+      if(e.data.cmd==='ready'){
+        workersReady++;
+        if(workersReady===nWorkers){
+          self.postMessage({cmd:'workersReady',numWorkers:nWorkers});
+          if(pendingStart){pendingStart=false;startEpoch();}
+        }
+      } else if(e.data.cmd==='done'){
+        if(--pendingDone===0) continueAfterWorkers?.();
+      }
+    };
+    w.postMessage({cmd:'init',sab});
+    simWorkers.push(w);
+  }
+}
+
+// ── Epoch logic ───────────────────────────────────────────────────────────────
+function collectPairs(){
+  for(let i=0;i<N_PROG;i++)order[i]=i;
+  rng.shuffle(order,N_PROG);
+  for(let i=0;i<N_PROG;i++){const nc=nCounts[i];proposals[i]=nc>0?neighbors[i*24+rng.int(nc)]:-1;}
+  taken.fill(0);
+  let np=0;
+  for(let oi=0;oi<N_PROG;oi++){
+    const p=order[oi],n=proposals[p];
+    if(n<0||taken[p]||taken[n])continue;
+    taken[p]=taken[n]=1;
+    pairsA[np]=p;pairsB[np]=n;np++;
+  }
+  return np;
+}
+
+function dispatchPairs(np){
+  const cs=Math.ceil(np/nWorkers);
+  pendingDone=0;
+  for(let w=0;w<nWorkers;w++){
+    const s=w*cs,e2=Math.min(s+cs,np);
+    if(s>=np)continue;
+    const chunk=new Int32Array((e2-s)*2);
+    for(let i=s,j=0;i<e2;i++){chunk[j++]=pairsA[i];chunk[j++]=pairsB[i];}
+    pendingDone++;
+    simWorkers[w].postMessage({cmd:'run',pairs:chunk});
+  }
+  if(pendingDone===0) continueAfterWorkers?.();
+}
+
+let epoch=0,mutRate=BASE_MUT,running=false,targetMs=0,lastSendTime=0;
+
+function applyMutations(){
+  if(mutRate<=0)return;
+  const sz=programs.length,nm=Math.round(sz*mutRate);
+  for(let i=0;i<nm;i++)programs[rng.int(sz)]=rng.int(256);
+}
+
+function finishEpoch(){
+  epoch++;
+  const now=performance.now();
+  if(now-lastSendTime>=50||!running){self.postMessage({epoch});lastSendTime=now;}
+  if(running){
+    if(targetMs>0)setTimeout(startEpoch,targetMs);
+    else startEpoch();
+  }
+}
+
+function startEpoch(){
+  if(!running)return;
+  const np=collectPairs();
+  continueAfterWorkers=()=>{applyMutations();finishEpoch();};
+  dispatchPairs(np);
+}
+
+function initSim(seed){rng=makePRNG(seed>>>0);epoch=0;rng.fill(programs);}
+
+// ── Message handler ───────────────────────────────────────────────────────────
+self.onmessage=function(e){
+  const d=e.data;
+  switch(d.cmd){
+    case 'init':
+      running=false;
+      programs=new Uint8Array(d.sab);
+      initWorkers(d.sab,d.simSrc,d.numWorkers);
+      initSim(d.seed??1);
+      self.postMessage({epoch});   // initial state; workers still spinning up
+      break;
+    case 'start':
+      if(!running){
+        running=true;
+        if(workersReady===nWorkers)startEpoch();
+        else pendingStart=true;
+      }
+      break;
+    case 'pause':
+      running=false;
+      self.postMessage({epoch});
+      break;
+    case 'step': {
+      running=false;
+      const np=collectPairs();
+      continueAfterWorkers=()=>{applyMutations();epoch++;self.postMessage({epoch});};
+      dispatchPairs(np);
+      break;
+    }
+    case 'setMut': mutRate=d.value; break;
+    case 'setSpeed': targetMs=d.value; break;
+    case 'init2':   // re-init without rebuilding worker pool
+      running=false;
+      initSim(d.seed??1);
+      self.postMessage({epoch});
+      break;
+  }
+};
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MAIN THREAD  –  WebGL2 rendering + UI
+     ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+'use strict';
+
+// ── Palette ───────────────────────────────────────────────────────────────────
+const GT=62,LT=60,RB=125,LB=123,PLUS=43,MINUS=45,DOT=46,COMMA=44,LBRACK=91,RBRACK=93;
+const PALETTE=new Map([
+  [LT,[239,71,111]],[GT,[255,209,102]],
+  [LB,[6,214,160]],[RB,[17,138,178]],
+  [MINUS,[255,127,80]],[PLUS,[131,56,236]],
+  [DOT,[58,134,255]],[COMMA,[255,190,11]],
+  [LBRACK,[139,201,38]],[RBRACK,[255,89,94]],
+]);
+const BG=[20,20,20];
+const OPCODE_SET=new Set(PALETTE.keys());
+const COLOR_LUT=new Uint8Array(256*4);
+for(let i=0;i<256;i++){const c=PALETTE.get(i)??BG;COLOR_LUT[i*4]=c[0];COLOR_LUT[i*4+1]=c[1];COLOR_LUT[i*4+2]=c[2];COLOR_LUT[i*4+3]=255;}
+
+// ── Grid / texture dimensions ─────────────────────────────────────────────────
+const GRID_W=240,GRID_H=135,TAPE=64,CELL=8;
+const TEX_W=GRID_W*CELL,TEX_H=GRID_H*CELL;  // 1920×1080
+const BASE_MUT=0.024/100.0;
+const SAB_SIZE=GRID_W*GRID_H*TAPE;           // 2,073,600 bytes
+
+// ── Canvas / WebGL2 ───────────────────────────────────────────────────────────
+const canvas=document.getElementById('canvas');
+canvas.width=TEX_W; canvas.height=TEX_H;
+const gl=canvas.getContext('webgl2',{alpha:false,antialias:false});
+if(!gl){document.body.innerHTML='<p style="color:#f55;padding:3em;text-align:center">WebGL2 required.</p>';throw new Error('no webgl2');}
+
+const VS=`#version 300 es
+in vec2 a_pos; out vec2 v_uv;
+void main(){v_uv=vec2(a_pos.x*.5+.5,.5-a_pos.y*.5);gl_Position=vec4(a_pos,0.,1.);}`;
+const FS=`#version 300 es
+precision mediump float;
+uniform sampler2D u_tex; in vec2 v_uv; out vec4 o;
+void main(){o=texture(u_tex,v_uv);}`;
+
+function mkShader(t,s){const sh=gl.createShader(t);gl.shaderSource(sh,s);gl.compileShader(sh);if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(sh));return sh;}
+const glProg=gl.createProgram();
+gl.attachShader(glProg,mkShader(gl.VERTEX_SHADER,VS));
+gl.attachShader(glProg,mkShader(gl.FRAGMENT_SHADER,FS));
+gl.linkProgram(glProg);
+if(!gl.getProgramParameter(glProg,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(glProg));
+
+const vao=gl.createVertexArray();gl.bindVertexArray(vao);
+const vbo=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vbo);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+const posLoc=gl.getAttribLocation(glProg,'a_pos');
+gl.enableVertexAttribArray(posLoc);gl.vertexAttribPointer(posLoc,2,gl.FLOAT,false,0,0);
+gl.bindVertexArray(null);
+
+const tex=gl.createTexture();
+const texData=new Uint8Array(TEX_W*TEX_H*4);
+gl.bindTexture(gl.TEXTURE_2D,tex);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,TEX_W,TEX_H,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+
+function buildTexData(p){
+  const lut=COLOR_LUT,t=texData;
+  for(let gy=0;gy<GRID_H;gy++){
+    const gyBase=gy*GRID_W*TAPE,gyPix=gy*CELL*TEX_W;
+    for(let py=0;py<CELL;py++){
+      const texRow=gyPix+py*TEX_W,tapeRow=py*CELL;
+      for(let gx=0;gx<GRID_W;gx++){
+        const po=gyBase+gx*TAPE+tapeRow,to=(texRow+gx*CELL)<<2;
+        for(let px=0;px<CELL;px++){const v=p[po+px],ci=v<<2,ti=to+(px<<2);t[ti]=lut[ci];t[ti+1]=lut[ci+1];t[ti+2]=lut[ci+2];t[ti+3]=255;}
+      }
+    }
+  }
+}
+
+function glRender(){
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,TEX_W,TEX_H,gl.RGBA,gl.UNSIGNED_BYTE,texData);
+  gl.viewport(0,0,TEX_W,TEX_H);
+  gl.useProgram(glProg);gl.bindVertexArray(vao);
+  gl.uniform1i(gl.getUniformLocation(glProg,'u_tex'),0);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+}
+
+// ── Worker setup ──────────────────────────────────────────────────────────────
+const statsEl=document.getElementById('stats');
+let programsView=null;   // Uint8Array — either SAB-backed (multi) or latest copy (single)
+let worker=null;
+let latestEpoch=0;
+let pendingRender=false;
+let paused=false;
+let multiCore=false;
+let numSimWorkers=0;
+
+if(crossOriginIsolated){
+  // ── Multi-core path: SharedArrayBuffer + coordinator + sim workers ──────────
+  multiCore=true;
+  const sab=new SharedArrayBuffer(SAB_SIZE);
+  programsView=new Uint8Array(sab);   // stays constant; always current
+
+  const coordSrc=document.getElementById('coordinator-src').textContent;
+  const simSrc=document.getElementById('sim-worker-src').textContent;
+  worker=new Worker(URL.createObjectURL(new Blob([coordSrc],{type:'text/javascript'})));
+
+  numSimWorkers=Math.max(1,(navigator.hardwareConcurrency||4)-2);
+
+  worker.onmessage=function(e){
+    const d=e.data;
+    if(d.cmd==='workersReady'){
+      numSimWorkers=d.numWorkers;
+      statsEl.textContent=`Multi-core: ${numSimWorkers} sim workers active`;
+    } else if('epoch' in d){
+      latestEpoch=d.epoch;
+      pendingRender=true;
+    }
+  };
+
+  worker.postMessage({cmd:'init',sab,simSrc,numWorkers:numSimWorkers,seed:1});
+  worker.postMessage({cmd:'start'});
+
+} else {
+  // ── Single-worker fallback ──────────────────────────────────────────────────
+  statsEl.textContent='Starting simulation worker\u2026';
+  const src=document.getElementById('single-worker-src').textContent;
+  worker=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
+
+  worker.onmessage=function(e){
+    programsView=e.data.programs;
+    latestEpoch=e.data.epoch;
+    pendingRender=true;
+  };
+}
+
+// ── Stats helpers ─────────────────────────────────────────────────────────────
+function opcodePercent(p){let n=0;for(let i=0;i<p.length;i++)if(OPCODE_SET.has(p[i]))n++;return 100*n/p.length;}
+
+const rateSamples=[];
+function recordEpoch(ep){
+  const now=performance.now();
+  rateSamples.push({epoch:ep,t:now});
+  while(rateSamples.length>1&&now-rateSamples[0].t>2000)rateSamples.shift();
+}
+function epochsPerSec(){
+  if(rateSamples.length<2)return 0;
+  const a=rateSamples[0],b=rateSamples[rateSamples.length-1],dt=(b.t-a.t)/1000;
+  return dt<0.1?0:(b.epoch-a.epoch)/dt;
+}
+function fmtRate(eps){
+  if(eps<=0)return'\u2014';
+  if(eps>=1000)return(eps/1000).toFixed(1)+'K ep/s';
+  if(eps>=10)return Math.round(eps)+' ep/s';
+  return eps.toFixed(1)+' ep/s';
+}
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+let fps=0,fpsCount=0,fpsTimer=performance.now();
+
+function frame(){
+  if(pendingRender&&programsView){
+    pendingRender=false;
+    buildTexData(programsView);
+    glRender();
+
+    fpsCount++;
+    const now=performance.now();
+    if(now-fpsTimer>=1000){fps=Math.round(fpsCount*1000/(now-fpsTimer));fpsCount=0;fpsTimer=now;}
+
+    recordEpoch(latestEpoch);
+    const pct=opcodePercent(programsView).toFixed(2);
+    const modeTag=multiCore?` \u2502 ${numSimWorkers} workers`:'';
+    statsEl.textContent=
+      `epoch ${latestEpoch.toLocaleString()} \u2502 `+
+      `opcode ${pct}% \u2502 `+
+      `${fmtRate(epochsPerSec())} \u2502 `+
+      `${fps} fps`+modeTag;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ── UI controls ───────────────────────────────────────────────────────────────
+const btnPlay=document.getElementById('btnPlay');
+btnPlay.addEventListener('click',()=>{
+  paused=!paused;
+  if(paused){worker.postMessage({cmd:'pause'});btnPlay.innerHTML='&#9654; Play';}
+  else{worker.postMessage({cmd:'start'});btnPlay.innerHTML='&#9646;&#9646; Pause';}
+});
+
+document.getElementById('btnStep').addEventListener('click',()=>{
+  paused=true;btnPlay.innerHTML='&#9654; Play';
+  worker.postMessage({cmd:'step'});
+});
+
+document.getElementById('btnReset').addEventListener('click',()=>{
+  const seed=parseInt(document.getElementById('seedInput').value,10)||1;
+  paused=false;btnPlay.innerHTML='&#9646;&#9646; Pause';
+  rateSamples.length=0;
+  if(multiCore){
+    // Re-init without rebuilding worker pool (workers keep their SAB reference)
+    worker.postMessage({cmd:'init2',seed});
+    worker.postMessage({cmd:'start'});
+  } else {
+    worker.postMessage({cmd:'init',seed});
+    worker.postMessage({cmd:'start'});
+  }
+});
+
+document.getElementById('btnApplySeed').addEventListener('click',()=>document.getElementById('btnReset').click());
+
+function sliderToDelayMs(v){
+  if(v>=20)return 0;
+  return Math.max(4,Math.round(1500/Math.pow(2,(v-1)*7/18)));
+}
+const speedSlider=document.getElementById('speedSlider');
+const speedValEl=document.getElementById('speedVal');
+speedSlider.addEventListener('input',function(){
+  const v=parseInt(this.value,10),ms=sliderToDelayMs(v);
+  speedValEl.textContent=ms===0?'Max':'~'+Math.round(1000/Math.max(ms,4))+' ep/s';
+  worker.postMessage({cmd:'setSpeed',value:ms});
+});
+worker.postMessage({cmd:'setSpeed',value:0});
+
+const mutSlider=document.getElementById('mutSlider');
+const mutValEl=document.getElementById('mutVal');
+mutSlider.addEventListener('input',function(){
+  const scale=this.value/100;
+  mutValEl.textContent=scale.toFixed(2)+'\u00d7';
+  worker.postMessage({cmd:'setMut',value:BASE_MUT*scale});
+});
+
+// ── Legend ────────────────────────────────────────────────────────────────────
+const LEGEND=[
+  [LT,'<','head0 left'],[GT,'>','head0 right'],
+  [LB,'{','head1 left'],[RB,'}','head1 right'],
+  [MINUS,'-','decrement'],[PLUS,'+','increment'],
+  [DOT,'.','write h0\u2192h1'],[COMMA,',','read h1\u2192h0'],
+  [LBRACK,'[','loop open'],[RBRACK,']','loop close'],
+];
+const legendEl=document.getElementById('legend');
+for(const [op,sym,desc] of LEGEND){
+  const [r,g,b]=PALETTE.get(op);
+  const el=document.createElement('div');el.className='li';
+  el.innerHTML=`<div class="sw" style="background:rgb(${r},${g},${b})"></div>${sym}\u00a0${desc}`;
+  legendEl.appendChild(el);
+}
+
+// ── Service worker registration (for COOP/COEP → crossOriginIsolated) ─────────
+// On first load: SW installs and activates, then we reload → multi-core unlocked.
+// On subsequent loads: crossOriginIsolated===true, multi-core path is taken above.
+if('serviceWorker' in navigator && location.protocol!=='file:'){
+  navigator.serviceWorker.register('sw.js').then(reg=>{
+    if(reg.installing){
+      reg.installing.addEventListener('statechange',ev=>{
+        if(ev.target.state==='activated') location.reload();
+      });
+    }
+  }).catch(err=>console.warn('SW registration failed:',err));
+}
+</script>
+</body>
+</html>
