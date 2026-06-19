@@ -1,5 +1,7 @@
 # artificial-life
 
+**[Run in browser](https://raw.githack.com/SMUsamaShah/artificial-life/claude/browser-javascript-implementation-gVRBA/index.html)**
+
 A simple (300 lines of code) reproduction of [Computational Life: How Well-formed, Self-replicating Programs Emerge from Simple Interaction](https://arxiv.org/abs/2406.19108).
 
 ## Program description

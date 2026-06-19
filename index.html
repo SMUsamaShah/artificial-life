@@ -1,0 +1,1635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Artificial Life</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0a0a;
+      color: #ccc;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 12px 8px;
+      gap: 8px;
+    }
+
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+    }
+    h1 { font-size: 15px; color: #888; letter-spacing: 3px; text-transform: uppercase; }
+    header a { font-size: 11px; color: #555; text-decoration: none; }
+    header a:hover { color: #888; }
+    #shareBtn {
+      font-size: 11px; color: #444; background: none; border: none;
+      cursor: pointer; font-family: inherit; padding: 0;
+    }
+    #shareBtn:hover { color: #888; }
+
+    #controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      justify-content: center;
+    }
+
+    button {
+      background: #161616;
+      color: #bbb;
+      border: 1px solid #333;
+      padding: 4px 14px;
+      cursor: pointer;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 12px;
+      transition: background 0.1s, border-color 0.1s;
+    }
+    button:hover { background: #222; border-color: #555; }
+    button.active { background: #1a2a1a; border-color: #3a7; color: #6c6; }
+    button.active-orange { background: #2a1a00; border-color: #a73; color: #c96; }
+
+    .pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #111;
+      padding: 4px 10px;
+      border-radius: 3px;
+      border: 1px solid #222;
+    }
+    .pill label { color: #666; white-space: nowrap; }
+    .pill .val { color: #aaa; min-width: 54px; text-align: right; }
+
+    input[type=range] {
+      width: 80px;
+      cursor: pointer;
+      accent-color: #3a7;
+    }
+    input[type=number], select {
+      background: #161616;
+      color: #bbb;
+      border: 1px solid #333;
+      padding: 3px 6px;
+      font-family: inherit;
+      font-size: 12px;
+      border-radius: 3px;
+    }
+    input[type=number] { width: 58px; }
+
+    #stats {
+      display: flex;
+      gap: 18px;
+      color: #555;
+      font-size: 12px;
+    }
+    #stats .val { color: #999; }
+
+    #canvas-wrap { position: relative; }
+    canvas {
+      display: block;
+      border: 1px solid #1a1a1a;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      cursor: crosshair;
+      max-width: 100vw;
+      max-height: calc(100vh - 160px);
+    }
+    #canvas.paste-mode { cursor: cell; }
+
+    /* Zoom overlay */
+    #zoom {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      background: rgba(10,10,10,0.94);
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 8px;
+      display: none;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #zoom.pinned { pointer-events: auto; border-color: #555; }
+    #zoom canvas {
+      display: block;
+      border: none;
+      width: 80px;
+      height: 80px;
+    }
+    #zoom-label {
+      font-size: 10px;
+      color: #666;
+      text-align: center;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+    #zoom-actions {
+      display: flex;
+      gap: 4px;
+      margin-top: 6px;
+      justify-content: center;
+    }
+    #zoom-actions button {
+      font-size: 10px;
+      padding: 2px 8px;
+    }
+
+    /* Paste mode banner */
+    #paste-banner {
+      position: absolute;
+      bottom: 6px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(20,10,0,0.92);
+      border: 1px solid #a73;
+      color: #c96;
+      font-size: 11px;
+      padding: 4px 12px;
+      border-radius: 3px;
+      display: none;
+      pointer-events: none;
+      z-index: 10;
+      white-space: nowrap;
+    }
+
+    /* Rewind bar */
+    #rewind-bar {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: #666;
+    }
+    #rewind-bar input[type=range] { width: 200px; accent-color: #a73; }
+    #rewindLabel { color: #999; min-width: 70px; }
+
+    /* Graph */
+    #graph-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+    }
+    #graphCanvas {
+      border: 1px solid #1a1a1a;
+      border-radius: 2px;
+      max-width: 100vw;
+    }
+    #graph-legend {
+      font-size: 10px;
+      display: flex;
+      gap: 12px;
+      color: #555;
+    }
+
+    #legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: center;
+      font-size: 11px;
+      color: #666;
+    }
+    .li { display: flex; align-items: center; gap: 4px; }
+    .lc { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+    /* Toast */
+    #toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1a2a1a;
+      border: 1px solid #3a7;
+      color: #6c6;
+      font-size: 12px;
+      padding: 6px 16px;
+      border-radius: 4px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+      z-index: 200;
+    }
+    #toast.show { opacity: 1; }
+
+    /* Tooltip */
+    #tooltip {
+      position: fixed;
+      background: #111;
+      border: 1px solid #333;
+      padding: 8px 12px;
+      font-size: 11px;
+      border-radius: 4px;
+      pointer-events: none;
+      display: none;
+      z-index: 100;
+      line-height: 1.8;
+      color: #aaa;
+    }
+    #tooltip b { color: #ddd; }
+    #tooltip .tape-row { letter-spacing: 2px; }
+
+    /* Editor modal */
+    #editor-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.8);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 300;
+    }
+    #editor-modal {
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-width: 95vw;
+    }
+    #editor-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #888;
+      font-size: 12px;
+    }
+    #editor-header button {
+      padding: 2px 8px;
+      font-size: 14px;
+      line-height: 1;
+    }
+    #editor-grid {
+      display: grid;
+      grid-template-columns: repeat(8, 32px);
+      grid-template-rows: repeat(8, 32px);
+      gap: 2px;
+    }
+    .editor-cell {
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-family: 'Courier New', monospace;
+      cursor: pointer;
+      border-radius: 2px;
+      border: 1px solid transparent;
+      user-select: none;
+      color: rgba(255,255,255,0.85);
+      transition: border-color 0.1s;
+    }
+    .editor-cell:hover { border-color: #888; }
+    #editor-footer {
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+    #editor-hint {
+      font-size: 10px;
+      color: #555;
+      text-align: center;
+    }
+  </style>
+</head>
+<script>
+// Register service worker that adds COOP/COEP headers (required for SharedArrayBuffer).
+// On first run the SW installs, then we reload so the headers take effect.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(reg => {
+    if (!crossOriginIsolated) {
+      // SW just became active or was already registered but headers weren't applied yet.
+      reg.installing
+        ? reg.installing.addEventListener('statechange', e => {
+            if (e.target.state === 'activated') location.reload();
+          })
+        : location.reload();
+    }
+  }).catch(() => {}); // silently ignore if serving from file:// etc.
+}
+</script>
+<body>
+
+<header id="hdr">
+  <h1>Artificial Life</h1>
+  <a href="https://arxiv.org/abs/2406.19108" target="_blank">arxiv:2406.19108</a>
+  <span style="font-size:11px;color:#444">v1.1</span>
+  <button id="shareBtn">Share ↗</button>
+</header>
+
+<div id="controls">
+  <button id="btnToggle">&#9654; Start</button>
+  <button id="btnStep">Step</button>
+  <button id="btnReset">Reset</button>
+
+  <div class="pill">
+    <label>Grid:</label>
+    <select id="gridSize">
+      <option value="40x23">40×23  (tiny)</option>
+      <option value="80x45" selected>80×45  (small)</option>
+      <option value="120x68">120×68 (medium)</option>
+      <option value="160x90">160×90 (large)</option>
+      <option value="240x135">240×135 (full)</option>
+    </select>
+  </div>
+
+  <div class="pill">
+    <label>Speed:</label>
+    <input type="range" id="speed" min="1" max="30" value="5">
+    <span class="val" id="speedVal">5 ep/f</span>
+  </div>
+
+  <div class="pill">
+    <label>Mutation:</label>
+    <input type="range" id="mutRate" min="0" max="200" value="24">
+    <span class="val" id="mutRateVal">0.0240%</span>
+  </div>
+
+  <div class="pill">
+    <label>Seed:</label>
+    <input type="number" id="seed" value="1" min="0" max="99999">
+  </div>
+
+  <button id="btnEntropy">Entropy View</button>
+</div>
+
+<div id="stats">
+  <span>Epoch: <span class="val" id="sEpoch">0</span></span>
+  <span>Opcodes: <span class="val" id="sOpcodes">—</span></span>
+  <span>Pairs/ep: <span class="val" id="sPairs">—</span></span>
+  <span>ep/s: <span class="val" id="sEps">—</span></span>
+  <span>fps: <span class="val" id="sFps">—</span></span>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="canvas"></canvas>
+  <div id="zoom">
+    <canvas id="zoomCanvas" width="8" height="8"></canvas>
+    <div id="zoom-label"></div>
+    <div id="zoom-actions">
+      <button id="btnCopyCell">Copy</button>
+      <button id="btnEditCell">Edit</button>
+    </div>
+  </div>
+  <div id="paste-banner">Click a cell to paste &nbsp;·&nbsp; Esc to cancel</div>
+</div>
+
+<div id="rewind-bar">
+  <span>⏪ Rewind:</span>
+  <input type="range" id="rewindScrub" min="0" max="0" value="0">
+  <span id="rewindLabel">epoch 0</span>
+</div>
+
+<div id="graph-wrap">
+  <canvas id="graphCanvas" width="600" height="72"></canvas>
+  <div id="graph-legend">
+    <span style="color:#3a7">■ entropy (normalized)</span>
+    <span style="color:#f90">■ diversity (unique programs)</span>
+  </div>
+</div>
+
+<div id="legend"></div>
+<div id="tooltip"></div>
+<div id="toast"></div>
+
+<!-- Cell editor modal -->
+<div id="editor-overlay">
+  <div id="editor-modal">
+    <div id="editor-header">
+      <span id="editor-title">Edit cell [0,0]</span>
+      <button id="editor-close">×</button>
+    </div>
+    <div id="editor-grid"></div>
+    <div id="editor-hint">click = cycle opcode · right-click = set to data (0)</div>
+    <div id="editor-footer">
+      <button id="editor-clear">Clear all</button>
+      <button id="editor-cancel">Cancel</button>
+      <button id="editor-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+// ── Feature flags ─────────────────────────────────────────────────────────────
+// Workers + SharedArrayBuffer require crossOriginIsolated (set by sw.js headers).
+const USE_WORKERS = crossOriginIsolated &&
+                    typeof SharedArrayBuffer !== 'undefined' &&
+                    navigator.hardwareConcurrency > 1;
+const NUM_WORKERS = USE_WORKERS ? Math.max(1, navigator.hardwareConcurrency - 1) : 0;
+
+// Sentinel for Uint16 neighbor/proposal arrays (replaces -1).
+const NO_NEIGHBOR = 0xFFFF;
+
+// ── Opcodes (ASCII) ──────────────────────────────────────────────────────────
+const LT     = 60;   // <
+const GT     = 62;   // >
+const LB     = 123;  // {
+const RB     = 125;  // }
+const MINUS  = 45;   // -
+const PLUS   = 43;   // +
+const DOT    = 46;   // .
+const COMMA  = 44;   // ,
+const LBRACK = 91;   // [
+const RBRACK = 93;   // ]
+
+const OPCODE_TOKENS = [LT, GT, LB, RB, MINUS, PLUS, DOT, COMMA, LBRACK, RBRACK];
+const OPCODE_NAMES  = ['<', '>', '{', '}', '-',  '+',  '.',  ',',  '[',   ']'];
+// Cycle for editor: 0 (data) then each opcode
+const OPCODE_CYCLE  = [0, ...OPCODE_TOKENS];
+
+// ── Color palette ────────────────────────────────────────────────────────────
+const PALETTE = [
+  [239,  71, 111],  // <
+  [255, 209, 102],  // >
+  [  6, 214, 160],  // {
+  [ 17, 138, 178],  // }
+  [255, 127,  80],  // -
+  [131,  56, 236],  // +
+  [ 58, 134, 255],  // .
+  [255, 190,  11],  // ,
+  [139, 201,  38],  // [
+  [255,  89,  94],  // ]
+  [ 20,  20,  20],  // data
+];
+
+const COLOR_LUT_R = new Uint8Array(256).fill(20);
+const COLOR_LUT_G = new Uint8Array(256).fill(20);
+const COLOR_LUT_B = new Uint8Array(256).fill(20);
+OPCODE_TOKENS.forEach((tok, i) => {
+  COLOR_LUT_R[tok] = PALETTE[i][0];
+  COLOR_LUT_G[tok] = PALETTE[i][1];
+  COLOR_LUT_B[tok] = PALETTE[i][2];
+});
+
+const IS_OPCODE = new Uint8Array(256);
+OPCODE_TOKENS.forEach(tok => { IS_OPCODE[tok] = 1; });
+
+// ── PRNG (mulberry32) with saved state ───────────────────────────────────────
+function makePRNG(seed) {
+  let s = seed >>> 0;
+  function next() {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  next.getState = () => s;
+  next.setState = v => { s = v >>> 0; };
+  return next;
+}
+
+// ── Simulation state ─────────────────────────────────────────────────────────
+const TAPE_SIZE = 64;
+const MAX_ITER  = 8192;
+const MAX_H     = Math.log2(TAPE_SIZE); // ≈ 6
+
+let WIDTH, HEIGHT, N;
+let programs;
+let neighbors;
+let neighborCounts;
+let proposals;
+let orderBuf;
+let pairsBuf;
+let takenBuf;
+let concatTape;
+let epoch    = 0;
+let running  = false;
+let animId   = 0;
+let rng;
+
+let perfEpochs = 0;
+let perfFrames = 0;
+let perfT0     = 0;
+let lastPairCount = 0;
+
+// ── Worker pool (parallel pair execution) ─────────────────────────────────────
+let workers    = [];   // Worker instances
+let programsSAB, pairsSAB, ctrlSAB;
+let ctrl32;            // Int32Array view of ctrlSAB
+// ctrl32 layout: [0]=GEN, [1]=PAIR_COUNT, [2]=DONE
+
+// ── History / snapshot state ─────────────────────────────────────────────────
+const SNAPSHOT_EVERY = 10;
+const MAX_SNAPSHOTS  = 60;
+let snapshots = [];       // [{programs, epoch, rngState}]
+let isRewinding = false;  // true while user drags rewind scrubber
+
+let histEntropy = [];     // normalized [0,1] per snapshot
+let histUnique  = [];     // fraction of unique programs per snapshot
+
+// ── UI state ─────────────────────────────────────────────────────────────────
+let renderMode   = 'normal'; // 'normal' | 'entropy'
+let pinnedCell   = -1;       // grid index of pinned zoom cell, -1 = none
+let hoveredCell  = -1;
+let copiedTape   = null;     // Uint8Array(64) when in paste mode
+let editorCell   = -1;
+let editorTape   = null;
+
+// ── Embed mode ───────────────────────────────────────────────────────────────
+const isEmbed = new URLSearchParams(location.search).get('embed') === '1';
+if (isEmbed) {
+  document.getElementById('hdr').style.display        = 'none';
+  document.getElementById('controls').style.display   = 'none';
+  document.getElementById('stats').style.display      = 'none';
+  document.getElementById('graph-wrap').style.display = 'none';
+  document.getElementById('legend').style.display     = 'none';
+  document.getElementById('rewind-bar').style.display = 'none';
+}
+
+// ── URL state ────────────────────────────────────────────────────────────────
+function writeHash() {
+  const p = new URLSearchParams();
+  p.set('seed',  document.getElementById('seed').value);
+  p.set('grid',  document.getElementById('gridSize').value);
+  p.set('speed', document.getElementById('speed').value);
+  p.set('mut',   document.getElementById('mutRate').value);
+  history.replaceState(null, '', '#' + p.toString());
+}
+
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.has('seed'))  document.getElementById('seed').value = p.get('seed');
+  if (p.has('grid'))  document.getElementById('gridSize').value = p.get('grid');
+  if (p.has('speed')) {
+    const v = p.get('speed');
+    document.getElementById('speed').value = v;
+    document.getElementById('speedVal').textContent =
+      parseInt(v, 10) >= SPEED_MAX ? '∞' : v + ' ep/f';
+  }
+  if (p.has('mut')) {
+    const v = p.get('mut');
+    document.getElementById('mutRate').value = v;
+    document.getElementById('mutRateVal').textContent =
+      (parseInt(v, 10) / 100000 * 100).toFixed(4) + '%';
+  }
+}
+
+// ── Build neighborhood ───────────────────────────────────────────────────────
+function buildNeighborhood() {
+  for (let x = 0; x < WIDTH; x++) {
+    const xLo = Math.max(0, x - 2), xHi = Math.min(WIDTH, x + 3);
+    for (let y = 0; y < HEIGHT; y++) {
+      const yLo = Math.max(0, y - 2), yHi = Math.min(HEIGHT, y + 3);
+      const idx = x * HEIGHT + y;
+      let cnt = 0;
+      for (let nx = xLo; nx < xHi; nx++)
+        for (let ny = yLo; ny < yHi; ny++) {
+          if (nx === x && ny === y) continue;
+          neighbors[idx * 24 + cnt++] = nx * HEIGHT + ny;
+        }
+      neighborCounts[idx] = cnt;
+    }
+  }
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+function init() {
+  const [w, h] = document.getElementById('gridSize').value.split('x').map(Number);
+  WIDTH = w; HEIGHT = h; N = w * h;
+
+  const seedVal = (parseInt(document.getElementById('seed').value, 10) || 1) >>> 0;
+  rng = makePRNG(seedVal);
+
+  teardownWorkers();
+
+  // Allocate programs + pairsBuf in SharedArrayBuffer when workers are available
+  // so workers can read/write without copying.  Fall back to plain TypedArrays.
+  if (USE_WORKERS) {
+    programsSAB = new SharedArrayBuffer(N * TAPE_SIZE);
+    pairsSAB    = new SharedArrayBuffer(N * 2);           // Uint16, N entries (N/2 pairs max)
+    ctrlSAB     = new SharedArrayBuffer(3 * 4);           // 3 × Int32
+    ctrl32      = new Int32Array(ctrlSAB);
+    programs    = new Uint8Array(programsSAB);
+    pairsBuf    = new Uint16Array(pairsSAB);
+  } else {
+    programs = new Uint8Array(N * TAPE_SIZE);
+    pairsBuf = new Uint16Array(N);
+  }
+
+  // Index arrays stay on main thread — Uint16/Uint8 halves memory vs Int32.
+  // N ≤ 32400 < 65535 so Uint16 can hold all cell indices.
+  neighbors      = new Uint16Array(N * 24).fill(NO_NEIGHBOR);
+  neighborCounts = new Uint8Array(N);
+  proposals      = new Uint16Array(N);
+  orderBuf       = new Uint16Array(N);
+  takenBuf       = new Uint8Array(N);
+  concatTape     = new Uint8Array(TAPE_SIZE * 2);  // fallback path only
+
+  for (let i = 0; i < programs.length; i++) programs[i] = (rng() * 256) | 0;
+  buildNeighborhood();
+
+  if (USE_WORKERS) spawnWorkers();
+
+  epoch = 0; perfEpochs = 0; perfFrames = 0; perfT0 = performance.now(); lastPairCount = 0;
+  snapshots = []; histEntropy = []; histUnique = [];
+  pinnedCell = -1; copiedTape = null; isRewinding = false;
+  cancelPasteMode();
+
+  resizeCanvas();
+  setupGL();
+  createGLTextures();
+  render();
+  updateStats();
+  updateRewindUI();
+  renderGraph();
+}
+
+// ── Canvas / renderer setup ───────────────────────────────────────────────────
+const canvas = document.getElementById('canvas');
+const gl     = canvas.getContext('webgl2', { alpha: false });
+const USE_GL = !!gl;
+// 2D context used as fallback and for zoom panel parent
+let ctx = null;
+if (!USE_GL) ctx = canvas.getContext('2d', { alpha: false });
+
+// ── WebGL2 renderer ───────────────────────────────────────────────────────────
+let glNormalProg = null, glEntropyProg = null;
+let programsTex  = null, lutTex = null, entropyTex = null;
+let glInited     = false;
+// Texture packing: cells are laid out in rows of cellsPerRow cells.
+// texW = TAPE_SIZE * cellsPerRow, texH = ceil(N / cellsPerRow).
+// Needed when N > MAX_TEXTURE_SIZE (e.g. 32400 > 16384 on some GPUs).
+let progTexW = 0, progTexH = 0, cellsPerRow = 1;
+let entTexW  = 0, entTexH  = 0;
+// Cached uniform locations (set when programs change after createGLTextures).
+let uNormalLocs = null, uEntropyLocs = null;
+
+const VERT_SRC = `#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const FRAG_NORMAL_SRC = `#version 300 es
+precision mediump float;
+uniform sampler2D uPrograms;
+uniform sampler2D uLut;
+uniform ivec2 uGrid;
+uniform int uCanvasH;
+uniform int uCellsPerRow;
+out vec4 fragColor;
+void main() {
+  int px = int(gl_FragCoord.x);
+  int py = uCanvasH - 1 - int(gl_FragCoord.y);
+  int cellIdx = (px / 8) * uGrid.y + (py / 8);
+  int byteIdx = (py % 8) * 8 + (px % 8);
+  int cellRow = cellIdx / uCellsPerRow;
+  int cellCol = cellIdx % uCellsPerRow;
+  float v = texelFetch(uPrograms, ivec2(cellCol * 64 + byteIdx, cellRow), 0).r;
+  int b = int(v * 255.0 + 0.5);
+  fragColor = texelFetch(uLut, ivec2(b, 0), 0);
+}`;
+
+const FRAG_ENTROPY_SRC = `#version 300 es
+precision mediump float;
+uniform sampler2D uCellColors;
+uniform ivec2 uGrid;
+uniform int uCanvasH;
+out vec4 fragColor;
+void main() {
+  int px = int(gl_FragCoord.x);
+  int py = uCanvasH - 1 - int(gl_FragCoord.y);
+  int cellIdx = (px / 8) * uGrid.y + (py / 8);
+  fragColor = texelFetch(uCellColors, ivec2(cellIdx, 0), 0);
+}`;
+
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+function linkProgram(vert, frag) {
+  const p = gl.createProgram();
+  gl.attachShader(p, vert);
+  gl.attachShader(p, frag);
+  gl.linkProgram(p);
+  return p;
+}
+function setupGL() {
+  if (!USE_GL || glInited) return;
+  glInited = true;
+  gl.clearColor(0, 0, 0, 1);
+
+  const vert = compileShader(gl.VERTEX_SHADER, VERT_SRC);
+  glNormalProg  = linkProgram(vert, compileShader(gl.FRAGMENT_SHADER, FRAG_NORMAL_SRC));
+  glEntropyProg = linkProgram(vert, compileShader(gl.FRAGMENT_SHADER, FRAG_ENTROPY_SRC));
+
+  // Full-screen quad
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  [glNormalProg, glEntropyProg].forEach(p => {
+    gl.useProgram(p);
+    const loc = gl.getAttribLocation(p, 'aPos');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  });
+  // Cache uniform locations once (avoids per-frame string lookups).
+  uNormalLocs  = { prog: glNormalProg,
+    uPrograms:    gl.getUniformLocation(glNormalProg, 'uPrograms'),
+    uLut:         gl.getUniformLocation(glNormalProg, 'uLut'),
+    uGrid:        gl.getUniformLocation(glNormalProg, 'uGrid'),
+    uCanvasH:     gl.getUniformLocation(glNormalProg, 'uCanvasH'),
+    uCellsPerRow: gl.getUniformLocation(glNormalProg, 'uCellsPerRow'),
+  };
+  uEntropyLocs = { prog: glEntropyProg,
+    uCellColors:  gl.getUniformLocation(glEntropyProg, 'uCellColors'),
+    uGrid:        gl.getUniformLocation(glEntropyProg, 'uGrid'),
+    uCanvasH:     gl.getUniformLocation(glEntropyProg, 'uCanvasH'),
+  };
+
+  // Color LUT texture (256×1 RGBA8): maps byte value → color
+  const lutData = new Uint8Array(256 * 4).fill(20);
+  for (let i = 3; i < lutData.length; i += 4) lutData[i] = 255;
+  OPCODE_TOKENS.forEach((tok, i) => {
+    lutData[tok * 4    ] = PALETTE[i][0];
+    lutData[tok * 4 + 1] = PALETTE[i][1];
+    lutData[tok * 4 + 2] = PALETTE[i][2];
+    lutData[tok * 4 + 3] = 255;
+  });
+  lutTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, lutTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, lutData);
+}
+
+function createGLTextures() {
+  if (!USE_GL) return;
+
+  // Compute safe texture dimensions: pack cellsPerRow cells per texture row
+  // so neither dimension exceeds MAX_TEXTURE_SIZE.
+  const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  cellsPerRow = Math.max(1, Math.ceil(N / maxTex));
+  progTexW    = TAPE_SIZE * cellsPerRow;
+  progTexH    = Math.ceil(N / cellsPerRow);
+
+  // Rebuild programs texture with correct packed layout.
+  // If cellsPerRow > 1 we need to repack the data row by row.
+  let texData = programs;
+  if (cellsPerRow > 1) {
+    texData = new Uint8Array(progTexW * progTexH);
+    for (let c = 0; c < N; c++) {
+      const row = Math.floor(c / cellsPerRow);
+      const col = c % cellsPerRow;
+      texData.set(programs.subarray(c * TAPE_SIZE, (c + 1) * TAPE_SIZE),
+                  row * progTexW + col * TAPE_SIZE);
+    }
+  }
+
+  if (programsTex) gl.deleteTexture(programsTex);
+  programsTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, programsTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, progTexW, progTexH, 0, gl.RED, gl.UNSIGNED_BYTE, texData);
+
+  // Entropy color texture: RGBA8, width=min(N,maxTex), height=ceil(N/maxTex).
+  entTexW = Math.min(N, maxTex);
+  entTexH = Math.ceil(N / entTexW);
+  const entW = entTexW, entH = entTexH;
+  if (entropyTex) gl.deleteTexture(entropyTex);
+  entropyTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, entropyTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, entW, entH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+}
+
+function resizeCanvas() {
+  canvas.width  = WIDTH  * 8;
+  canvas.height = HEIGHT * 8;
+  const maxW  = window.innerWidth - 16;
+  const scale = Math.min(1, maxW / canvas.width);
+  canvas.style.width  = (canvas.width  * scale) + 'px';
+  canvas.style.height = (canvas.height * scale) + 'px';
+
+  if (USE_GL) gl.viewport(0, 0, canvas.width, canvas.height);
+
+  const gw = Math.min(600, Math.round(canvas.width * scale));
+  const graphCanvas = document.getElementById('graphCanvas');
+  graphCanvas.style.width = gw + 'px';
+}
+
+// ── Entropy utilities ────────────────────────────────────────────────────────
+function hslToRgb(h, s, l) {
+  h /= 360;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => {
+    const k = (n + h * 12) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+}
+
+function tapeEntropy(base) {
+  const freq = new Uint8Array(256);
+  for (let i = 0; i < TAPE_SIZE; i++) freq[programs[base + i]]++;
+  let h = 0;
+  for (let b = 0; b < 256; b++) {
+    if (freq[b] === 0) continue;
+    const p = freq[b] / TAPE_SIZE;
+    h -= p * Math.log2(p);
+  }
+  return h; // 0 .. MAX_H (≈6)
+}
+
+function entropyToRgb(h) {
+  // blue (240°) = low entropy, yellow (60°) = high entropy
+  const hue = 240 - (h / MAX_H) * 180;
+  const lit  = 0.15 + (h / MAX_H) * 0.45;
+  return hslToRgb(hue, 0.85, lit);
+}
+
+function tapeHash(base) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < TAPE_SIZE; i++)
+    h = Math.imul(h ^ programs[base + i], 16777619) >>> 0;
+  return h;
+}
+
+function computeDiversity() {
+  const sampleSize = Math.min(N, 400);
+  const step = N / sampleSize;
+  const seen = new Set();
+  for (let i = 0; i < sampleSize; i++)
+    seen.add(tapeHash(Math.floor(i * step) * TAPE_SIZE));
+  return seen.size / sampleSize;
+}
+
+function computeAvgEntropy() {
+  const sampleSize = Math.min(N, 400);
+  const step = N / sampleSize;
+  let sum = 0;
+  for (let i = 0; i < sampleSize; i++)
+    sum += tapeEntropy(Math.floor(i * step) * TAPE_SIZE);
+  return sum / sampleSize / MAX_H; // normalized [0,1]
+}
+
+// ── Core interpreter ─────────────────────────────────────────────────────────
+function seekMatch(tape, pc, step, openTok, closeTok) {
+  const len = tape.length;
+  let depth = 1;
+  pc += step;
+  while (pc >= 0 && pc < len && depth > 0) {
+    const op = tape[pc];
+    if      (op === openTok)  depth++;
+    else if (op === closeTok) depth--;
+    pc += step;
+  }
+  return depth === 0 ? pc - step : -1;
+}
+
+function runTape(tape) {
+  const len = tape.length;
+  let pc = 0, head0 = 0, head1 = 0;
+  for (let iter = 0; iter < MAX_ITER; iter++) {
+    if (pc < 0 || pc >= len) break;
+    const op = tape[pc];
+    if      (op === LT)    head0 = head0 === 0 ? len - 1 : head0 - 1;
+    else if (op === GT)    head0 = head0 + 1 === len ? 0 : head0 + 1;
+    else if (op === LB)    head1 = head1 === 0 ? len - 1 : head1 - 1;
+    else if (op === RB)    head1 = head1 + 1 === len ? 0 : head1 + 1;
+    else if (op === MINUS) tape[head0] = (tape[head0] - 1) & 0xFF;
+    else if (op === PLUS)  tape[head0] = (tape[head0] + 1) & 0xFF;
+    else if (op === DOT)   tape[head1] = tape[head0];
+    else if (op === COMMA) tape[head0] = tape[head1];
+    else if (op === LBRACK && tape[head0] === 0) {
+      pc = seekMatch(tape, pc, 1, LBRACK, RBRACK);
+      if (pc < 0) break;
+    } else if (op === RBRACK && tape[head0] !== 0) {
+      pc = seekMatch(tape, pc, -1, RBRACK, LBRACK);
+      if (pc < 0) break;
+    }
+    pc++;
+  }
+}
+
+// ── Worker pool helpers ───────────────────────────────────────────────────────
+function spawnWorkers() {
+  workers = [];
+  for (let id = 0; id < NUM_WORKERS; id++) {
+    const w = new Worker('./worker.js');
+    w.postMessage({ programsSAB, pairsSAB, ctrlSAB, workerId: id, numWorkers: NUM_WORKERS });
+    workers.push(w);
+  }
+}
+
+function teardownWorkers() {
+  if (workers.length === 0) return;
+  // Send stop signal (GEN = -1) so workers exit their loop.
+  if (ctrl32) {
+    Atomics.store(ctrl32, 0, -1);
+    Atomics.notify(ctrl32, 0, Infinity);
+  }
+  workers.forEach(w => w.terminate());
+  workers = [];
+}
+
+async function dispatchPairs(pairCount) {
+  Atomics.store(ctrl32, 2, 0);           // reset DONE counter
+  Atomics.store(ctrl32, 1, pairCount);   // write pair count
+  Atomics.add(ctrl32, 0, 1);             // increment GEN — wakes all workers
+  Atomics.notify(ctrl32, 0, Infinity);
+
+  // Wait for all workers to finish.
+  while (Atomics.load(ctrl32, 2) < NUM_WORKERS) {
+    await Atomics.waitAsync(ctrl32, 2, Atomics.load(ctrl32, 2)).value;
+  }
+}
+
+// ── One epoch ────────────────────────────────────────────────────────────────
+// Returns pairCount; populates pairsBuf. Pure sync — no yielding.
+function runEpochPre() {
+  for (let i = 0; i < N; i++) orderBuf[i] = i;
+  for (let i = N - 1; i > 0; i--) {
+    const j = (rng() * (i + 1)) | 0;
+    const tmp = orderBuf[i]; orderBuf[i] = orderBuf[j]; orderBuf[j] = tmp;
+  }
+  for (let i = 0; i < N; i++) {
+    const cnt = neighborCounts[i];
+    proposals[i] = cnt > 0 ? neighbors[i * 24 + ((rng() * cnt) | 0)] : NO_NEIGHBOR;
+  }
+  takenBuf.fill(0);
+  let pairCount = 0;
+  for (let i = 0; i < N; i++) {
+    const p = orderBuf[i], n = proposals[p];
+    if (n === NO_NEIGHBOR || takenBuf[p] || takenBuf[n]) continue;
+    takenBuf[p] = takenBuf[n] = 1;
+    pairsBuf[pairCount * 2    ] = p;
+    pairsBuf[pairCount * 2 + 1] = n;
+    pairCount++;
+  }
+  lastPairCount = pairCount;
+  return pairCount;
+}
+
+// Execute pairs on the main thread (fallback when workers are unavailable).
+function runPairsSync(pairCount) {
+  for (let pi = 0; pi < pairCount; pi++) {
+    const idxA = pairsBuf[pi * 2], idxB = pairsBuf[pi * 2 + 1];
+    const baseA = idxA * TAPE_SIZE, baseB = idxB * TAPE_SIZE;
+    concatTape.set(programs.subarray(baseA, baseA + TAPE_SIZE), 0);
+    concatTape.set(programs.subarray(baseB, baseB + TAPE_SIZE), TAPE_SIZE);
+    runTape(concatTape);
+    programs.set(concatTape.subarray(0, TAPE_SIZE), baseA);
+    programs.set(concatTape.subarray(TAPE_SIZE),    baseB);
+  }
+}
+
+// Mutation + bookkeeping. Pure sync.
+function runEpochPost() {
+  const mutRate = parseInt(document.getElementById('mutRate').value, 10) / 100000;
+  if (mutRate > 0) {
+    const expected = programs.length * mutRate;
+    let numMut;
+    if (expected < 30) {
+      const L = Math.exp(-expected);
+      let k = 0, p = 1;
+      do { p *= rng(); k++; } while (p > L);
+      numMut = k - 1;
+    } else {
+      numMut = Math.max(0, Math.round(expected + Math.sqrt(expected) * (rng() * 2 - 1) * 1.7));
+    }
+    for (let m = 0; m < numMut; m++)
+      programs[(rng() * programs.length) | 0] = (rng() * 256) | 0;
+  }
+  epoch++;
+  perfEpochs++;
+}
+
+// Sync epoch (no workers). Zero async overhead.
+function runEpochSync() {
+  const pairCount = runEpochPre();
+  runPairsSync(pairCount);
+  runEpochPost();
+}
+
+// Async epoch (with workers). Only awaits the actual worker dispatch.
+async function runEpochAsync() {
+  const pairCount = runEpochPre();
+  if (pairCount > 0) await dispatchPairs(pairCount);
+  runEpochPost();
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+let imageData = null;
+
+function render() {
+  if (USE_GL) {
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    renderMode === 'entropy' ? renderEntropyGL() : renderNormalGL();
+  } else {
+    if (!imageData || imageData.width !== canvas.width || imageData.height !== canvas.height) {
+      imageData = ctx.createImageData(canvas.width, canvas.height);
+      const d = imageData.data;
+      for (let i = 3; i < d.length; i += 4) d[i] = 255;
+    }
+    renderMode === 'entropy' ? renderEntropyCPU() : renderNormalCPU();
+  }
+  perfFrames++;
+}
+
+// ── WebGL render paths ────────────────────────────────────────────────────────
+function renderNormalGL() {
+  // Upload programs. For cellsPerRow=1 we can upload the flat array directly.
+  // For packed textures we must rebuild the row layout each frame.
+  gl.bindTexture(gl.TEXTURE_2D, programsTex);
+  if (cellsPerRow === 1) {
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, progTexW, progTexH, gl.RED, gl.UNSIGNED_BYTE, programs);
+  } else {
+    const packed = new Uint8Array(progTexW * progTexH);
+    for (let c = 0; c < N; c++) {
+      const row = Math.floor(c / cellsPerRow), col = c % cellsPerRow;
+      packed.set(programs.subarray(c * TAPE_SIZE, (c + 1) * TAPE_SIZE),
+                 row * progTexW + col * TAPE_SIZE);
+    }
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, progTexW, progTexH, gl.RED, gl.UNSIGNED_BYTE, packed);
+  }
+
+  gl.useProgram(glNormalProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, programsTex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, lutTex);
+  gl.uniform1i(uNormalLocs.uPrograms,    0);
+  gl.uniform1i(uNormalLocs.uLut,         1);
+  gl.uniform2i(uNormalLocs.uGrid,        WIDTH, HEIGHT);
+  gl.uniform1i(uNormalLocs.uCanvasH,     canvas.height);
+  gl.uniform1i(uNormalLocs.uCellsPerRow, cellsPerRow);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+function renderEntropyGL() {
+  const entW = entTexW;
+  const colors = new Uint8Array(N * 4);
+  for (let i = 0; i < N; i++) {
+    const [r, g, b] = entropyToRgb(tapeEntropy(i * TAPE_SIZE));
+    colors[i * 4] = r; colors[i * 4 + 1] = g; colors[i * 4 + 2] = b; colors[i * 4 + 3] = 255;
+  }
+  gl.bindTexture(gl.TEXTURE_2D, entropyTex);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, entW, entTexH, gl.RGBA, gl.UNSIGNED_BYTE, colors);
+
+  gl.useProgram(glEntropyProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, entropyTex);
+  gl.uniform1i(uEntropyLocs.uCellColors, 0);
+  gl.uniform2i(uEntropyLocs.uGrid,       WIDTH, HEIGHT);
+  gl.uniform1i(uEntropyLocs.uCanvasH,    canvas.height);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ── Canvas 2D fallback paths ──────────────────────────────────────────────────
+function renderNormalCPU() {
+  const pix = imageData.data;
+  const cw8 = canvas.width;
+  for (let x = 0; x < WIDTH; x++) {
+    const px0 = x * 8;
+    for (let y = 0; y < HEIGHT; y++) {
+      const base = (x * HEIGHT + y) * TAPE_SIZE;
+      const py0  = y * 8;
+      for (let by = 0; by < 8; by++) {
+        const rowOff = (py0 + by) * cw8;
+        const tapeRow = by * 8;
+        for (let bx = 0; bx < 8; bx++) {
+          const byte = programs[base + tapeRow + bx];
+          const off  = (rowOff + px0 + bx) * 4;
+          pix[off    ] = COLOR_LUT_R[byte];
+          pix[off + 1] = COLOR_LUT_G[byte];
+          pix[off + 2] = COLOR_LUT_B[byte];
+        }
+      }
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
+function renderEntropyCPU() {
+  const pix = imageData.data;
+  const cw8 = canvas.width;
+  for (let x = 0; x < WIDTH; x++) {
+    const px0 = x * 8;
+    for (let y = 0; y < HEIGHT; y++) {
+      const base = (x * HEIGHT + y) * TAPE_SIZE;
+      const py0  = y * 8;
+      const [r, g, b] = entropyToRgb(tapeEntropy(base));
+      for (let by = 0; by < 8; by++) {
+        const rowOff = (py0 + by) * cw8;
+        for (let bx = 0; bx < 8; bx++) {
+          const off = (rowOff + px0 + bx) * 4;
+          pix[off    ] = r;
+          pix[off + 1] = g;
+          pix[off + 2] = b;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
+// ── Graph ────────────────────────────────────────────────────────────────────
+const graphCanvas = document.getElementById('graphCanvas');
+const gCtx = graphCanvas.getContext('2d', { alpha: false });
+
+function renderGraph() {
+  const W = graphCanvas.width, H = graphCanvas.height;
+  gCtx.fillStyle = '#0d0d0d';
+  gCtx.fillRect(0, 0, W, H);
+
+  if (histEntropy.length < 2) {
+    gCtx.fillStyle = '#222';
+    gCtx.fillText('(graph will appear as the simulation runs)', 10, H / 2 + 4);
+    return;
+  }
+
+  const n = Math.min(histEntropy.length, W);
+  const start = histEntropy.length - n;
+
+  function drawLine(data, color) {
+    gCtx.strokeStyle = color;
+    gCtx.lineWidth   = 1.5;
+    gCtx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * (W - 1);
+      const y = (1 - data[start + i]) * (H - 4) + 2;
+      i === 0 ? gCtx.moveTo(x, y) : gCtx.lineTo(x, y);
+    }
+    gCtx.stroke();
+  }
+
+  drawLine(histEntropy, '#3a7');
+  drawLine(histUnique,  '#f90');
+
+  // Y-axis labels
+  gCtx.fillStyle = '#444';
+  gCtx.font = '9px Courier New';
+  gCtx.fillText('100%', 2, 11);
+  gCtx.fillText('  0%', 2, H - 3);
+}
+
+// ── Stats ────────────────────────────────────────────────────────────────────
+function updateStats() {
+  document.getElementById('sEpoch').textContent = epoch;
+  document.getElementById('sPairs').textContent = lastPairCount > 0 ? lastPairCount : '—';
+
+  let opcodeCount = 0;
+  for (let i = 0; i < programs.length; i++) opcodeCount += IS_OPCODE[programs[i]];
+  document.getElementById('sOpcodes').textContent =
+    (100 * opcodeCount / programs.length).toFixed(2) + '%';
+
+  const dt = performance.now() - perfT0;
+  if (dt > 500) {
+    const inv = 1000 / dt;
+    document.getElementById('sEps').textContent = (perfEpochs * inv).toFixed(1);
+    document.getElementById('sFps').textContent = (perfFrames * inv).toFixed(1);
+    perfEpochs = 0;
+    perfFrames = 0;
+    perfT0 = performance.now();
+  }
+}
+
+// ── Snapshots ────────────────────────────────────────────────────────────────
+function takeSnapshot() {
+  if (epoch % SNAPSHOT_EVERY !== 0) return;
+  snapshots.push({ programs: programs.slice(), epoch, rngState: rng.getState() });
+  if (snapshots.length > MAX_SNAPSHOTS) snapshots.shift();
+
+  histEntropy.push(computeAvgEntropy());
+  histUnique.push(computeDiversity());
+  if (histEntropy.length > 2000) { histEntropy.shift(); histUnique.shift(); }
+
+  updateRewindUI();
+  renderGraph();
+}
+
+function updateRewindUI() {
+  const bar   = document.getElementById('rewind-bar');
+  const scrub = document.getElementById('rewindScrub');
+  if (!running && snapshots.length > 1) {
+    bar.style.display  = 'flex';
+    scrub.max          = snapshots.length - 1;
+    if (!isRewinding) scrub.value = snapshots.length - 1;
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+// ── Animation loop ───────────────────────────────────────────────────────────
+const SPEED_MAX = parseInt(document.getElementById('speed').max, 10);
+
+function isUnlimited() {
+  return parseInt(document.getElementById('speed').value, 10) >= SPEED_MAX;
+}
+
+function loop() {
+  if (!running) return;
+  if (USE_WORKERS) {
+    loopAsync().then(() => { if (running) animId = requestAnimationFrame(loop); });
+  } else {
+    const epf = parseInt(document.getElementById('speed').value, 10);
+    if (epf >= SPEED_MAX) {
+      // Unlimited: run epochs for the full frame budget, no fixed count.
+      const deadline = performance.now() + 14;
+      while (performance.now() < deadline) { runEpochSync(); takeSnapshot(); }
+    } else {
+      for (let i = 0; i < epf; i++) { runEpochSync(); takeSnapshot(); }
+    }
+    render();
+    updateStats();
+    animId = requestAnimationFrame(loop);
+  }
+}
+
+async function loopAsync() {
+  const epf = parseInt(document.getElementById('speed').value, 10);
+  if (epf >= SPEED_MAX) {
+    // Unlimited: run epochs until ~14ms elapsed (workers run in parallel).
+    const deadline = performance.now() + 14;
+    while (performance.now() < deadline) { await runEpochAsync(); takeSnapshot(); }
+  } else {
+    for (let i = 0; i < epf; i++) { await runEpochAsync(); takeSnapshot(); }
+  }
+  render();
+  updateStats();
+}
+
+// ── Zoom panel helpers ───────────────────────────────────────────────────────
+const zoomEl     = document.getElementById('zoom');
+const zoomCanvas = document.getElementById('zoomCanvas');
+const zoomCtx    = zoomCanvas.getContext('2d', { alpha: false });
+const zoomLabel  = document.getElementById('zoom-label');
+let zoomImgData  = zoomCtx.createImageData(8, 8);
+
+function showZoom(idx) {
+  const gx   = Math.floor(idx / HEIGHT);
+  const gy   = idx % HEIGHT;
+  const base = idx * TAPE_SIZE;
+
+  const zp = zoomImgData.data;
+  for (let i = 0; i < TAPE_SIZE; i++) {
+    const byte = programs[base + i];
+    const off  = i * 4;
+    zp[off    ] = COLOR_LUT_R[byte];
+    zp[off + 1] = COLOR_LUT_G[byte];
+    zp[off + 2] = COLOR_LUT_B[byte];
+    zp[off + 3] = 255;
+  }
+  zoomCtx.putImageData(zoomImgData, 0, 0);
+
+  let rows = [];
+  for (let r = 0; r < 8; r++) {
+    let row = '';
+    for (let c = 0; c < 8; c++) {
+      const b  = programs[base + r * 8 + c];
+      const oi = OPCODE_TOKENS.indexOf(b);
+      row += oi >= 0 ? OPCODE_NAMES[oi] : '·';
+    }
+    rows.push(row);
+  }
+
+  const ent = tapeEntropy(base).toFixed(2);
+  zoomLabel.innerHTML =
+    `[${gx},${gy}] H=${ent}<br>` +
+    rows.map(r => `<span class="tape-row">${r}</span>`).join('<br>');
+
+  zoomEl.style.display = 'block';
+}
+
+function getGridCell(e) {
+  const rect   = canvas.getBoundingClientRect();
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const mx = ((e.clientX - rect.left) * scaleX) | 0;
+  const my = ((e.clientY - rect.top)  * scaleY) | 0;
+  const gx = (mx / 8) | 0;
+  const gy = (my / 8) | 0;
+  if (gx >= WIDTH || gy >= HEIGHT || gx < 0 || gy < 0) return -1;
+  return gx * HEIGHT + gy;
+}
+
+// ── Paste mode ───────────────────────────────────────────────────────────────
+function enterPasteMode(tape) {
+  copiedTape = tape.slice();
+  canvas.classList.add('paste-mode');
+  document.getElementById('paste-banner').style.display = 'block';
+}
+function cancelPasteMode() {
+  copiedTape = null;
+  canvas.classList.remove('paste-mode');
+  document.getElementById('paste-banner').style.display = 'none';
+}
+
+// ── Toast ────────────────────────────────────────────────────────────────────
+let toastTimer = 0;
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+// ── Canvas mouse events ───────────────────────────────────────────────────────
+canvas.addEventListener('mousemove', e => {
+  const idx = getGridCell(e);
+  if (idx < 0) { if (pinnedCell < 0) zoomEl.style.display = 'none'; return; }
+  hoveredCell = idx;
+  if (pinnedCell < 0) showZoom(idx);
+});
+
+canvas.addEventListener('mouseleave', () => {
+  hoveredCell = -1;
+  if (pinnedCell < 0) zoomEl.style.display = 'none';
+});
+
+canvas.addEventListener('click', e => {
+  const idx = getGridCell(e);
+  if (idx < 0) return;
+
+  // Paste mode: paste copied tape into clicked cell
+  if (copiedTape !== null) {
+    programs.set(copiedTape, idx * TAPE_SIZE);
+    cancelPasteMode();
+    render();
+    showToast('Pasted program into cell');
+    return;
+  }
+
+  // Pin / unpin zoom panel
+  if (pinnedCell === idx) {
+    pinnedCell = -1;
+    zoomEl.classList.remove('pinned');
+    zoomEl.style.display = 'none';
+  } else {
+    pinnedCell = idx;
+    zoomEl.classList.add('pinned');
+    showZoom(idx);
+  }
+});
+
+canvas.addEventListener('dblclick', e => {
+  const idx = getGridCell(e);
+  if (idx < 0) return;
+  openEditor(idx);
+});
+
+// ── Zoom panel buttons ────────────────────────────────────────────────────────
+document.getElementById('btnCopyCell').addEventListener('click', () => {
+  if (pinnedCell < 0) return;
+  const base = pinnedCell * TAPE_SIZE;
+  const tape = programs.subarray(base, base + TAPE_SIZE);
+  enterPasteMode(tape);
+
+  // Also write to system clipboard as base64 so it can be saved and re-applied later.
+  const b64 = btoa(String.fromCharCode(...tape));
+  navigator.clipboard?.writeText('alife:' + b64).catch(() => {});
+
+  pinnedCell = -1;
+  zoomEl.classList.remove('pinned');
+  zoomEl.style.display = 'none';
+  showToast('Copied — click cell to paste  ·  V = paste from clipboard');
+});
+
+document.getElementById('btnEditCell').addEventListener('click', () => {
+  if (pinnedCell < 0) return;
+  openEditor(pinnedCell);
+});
+
+// ── Cell editor ───────────────────────────────────────────────────────────────
+function openEditor(idx) {
+  editorCell = idx;
+  editorTape = programs.slice(idx * TAPE_SIZE, (idx + 1) * TAPE_SIZE);
+  const gx = Math.floor(idx / HEIGHT), gy = idx % HEIGHT;
+  document.getElementById('editor-title').textContent = `Edit cell [${gx},${gy}]`;
+  buildEditorGrid();
+  document.getElementById('editor-overlay').style.display = 'flex';
+}
+
+function buildEditorGrid() {
+  const grid = document.getElementById('editor-grid');
+  grid.innerHTML = '';
+  for (let i = 0; i < TAPE_SIZE; i++) {
+    const b  = editorTape[i];
+    const oi = OPCODE_TOKENS.indexOf(b);
+    const char = oi >= 0 ? OPCODE_NAMES[oi] : '·';
+    const [r, g, bl] = oi >= 0 ? PALETTE[oi] : [30, 30, 30];
+
+    const cell = document.createElement('div');
+    cell.className = 'editor-cell';
+    cell.style.background = `rgb(${r},${g},${bl})`;
+    cell.textContent = char;
+    cell.title = `byte ${i}: ${b}`;
+    cell.addEventListener('click', () => cycleEditorCell(i, +1));
+    cell.addEventListener('contextmenu', ev => { ev.preventDefault(); editorTape[i] = 0; buildEditorGrid(); });
+    grid.appendChild(cell);
+  }
+}
+
+function cycleEditorCell(i, dir) {
+  const cur  = editorTape[i];
+  const ci   = OPCODE_CYCLE.indexOf(cur);
+  const next = (ci < 0 ? 1 : (ci + dir + OPCODE_CYCLE.length) % OPCODE_CYCLE.length);
+  editorTape[i] = OPCODE_CYCLE[next];
+  buildEditorGrid();
+}
+
+function closeEditor() {
+  document.getElementById('editor-overlay').style.display = 'none';
+  editorCell = -1;
+  editorTape = null;
+}
+
+document.getElementById('editor-save').addEventListener('click', () => {
+  if (editorCell < 0) return;
+  programs.set(editorTape, editorCell * TAPE_SIZE);
+  if (pinnedCell === editorCell) showZoom(editorCell);
+  render();
+  closeEditor();
+  showToast('Cell saved');
+});
+
+document.getElementById('editor-clear').addEventListener('click', () => {
+  editorTape.fill(0);
+  buildEditorGrid();
+});
+
+document.getElementById('editor-cancel').addEventListener('click', closeEditor);
+document.getElementById('editor-close').addEventListener('click',  closeEditor);
+
+// ── Main controls ─────────────────────────────────────────────────────────────
+const btnToggle = document.getElementById('btnToggle');
+
+function startSim() {
+  running = true;
+  btnToggle.textContent = '⏸ Pause';
+  btnToggle.classList.add('active');
+  perfT0 = performance.now(); perfEpochs = 0;
+  isRewinding = false;
+  updateRewindUI();
+  loop();
+}
+function pauseSim() {
+  running = false;
+  btnToggle.textContent = '▶ Start';
+  btnToggle.classList.remove('active');
+  cancelAnimationFrame(animId);
+  updateRewindUI();
+}
+
+btnToggle.addEventListener('click', () => running ? pauseSim() : startSim());
+
+document.getElementById('btnStep').addEventListener('click', async () => {
+  if (running) return;
+  if (USE_WORKERS) await runEpochAsync(); else runEpochSync();
+  takeSnapshot(); render(); updateStats(); updateRewindUI();
+});
+
+document.getElementById('btnReset').addEventListener('click', () => {
+  const was = running;
+  pauseSim();
+  init();
+  writeHash();
+  if (was) startSim();
+});
+
+document.getElementById('speed').addEventListener('input', function () {
+  const v = parseInt(this.value, 10);
+  document.getElementById('speedVal').textContent =
+    v >= SPEED_MAX ? '∞' : v + ' ep/f';
+});
+
+document.getElementById('mutRate').addEventListener('input', function () {
+  const pct = (parseInt(this.value, 10) / 100000 * 100).toFixed(4);
+  document.getElementById('mutRateVal').textContent = pct + '%';
+});
+
+document.getElementById('gridSize').addEventListener('change', () => {
+  const was = running;
+  pauseSim(); init(); writeHash(); if (was) startSim();
+});
+
+document.getElementById('seed').addEventListener('change', writeHash);
+
+// ── Entropy toggle ────────────────────────────────────────────────────────────
+document.getElementById('btnEntropy').addEventListener('click', function () {
+  renderMode = renderMode === 'entropy' ? 'normal' : 'entropy';
+  this.textContent = renderMode === 'entropy' ? 'Normal View' : 'Entropy View';
+  this.classList.toggle('active-orange', renderMode === 'entropy');
+  render();
+});
+
+// ── Rewind scrubber ───────────────────────────────────────────────────────────
+document.getElementById('rewindScrub').addEventListener('input', function () {
+  isRewinding = true;
+  const snap = snapshots[parseInt(this.value, 10)];
+  if (!snap) return;
+  programs.set(snap.programs);
+  epoch = snap.epoch;
+  rng.setState(snap.rngState);
+  document.getElementById('rewindLabel').textContent = 'epoch ' + epoch;
+  render();
+  updateStats();
+  if (pinnedCell >= 0) showZoom(pinnedCell);
+});
+
+// ── Share button ──────────────────────────────────────────────────────────────
+document.getElementById('shareBtn').addEventListener('click', () => {
+  writeHash();
+  const url = location.href;
+  navigator.clipboard.writeText(url).then(
+    ()  => showToast('URL copied to clipboard'),
+    ()  => { prompt('Copy this URL:', url); }
+  );
+});
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' ||
+      e.target.tagName === 'TEXTAREA') return;
+
+  if (e.key === 'Escape') {
+    if (copiedTape !== null) { cancelPasteMode(); return; }
+    if (document.getElementById('editor-overlay').style.display !== 'none') {
+      closeEditor(); return;
+    }
+    if (pinnedCell >= 0) {
+      pinnedCell = -1;
+      zoomEl.classList.remove('pinned');
+      zoomEl.style.display = 'none';
+    }
+  }
+  if (e.key === ' ') {
+    e.preventDefault();
+    running ? pauseSim() : startSim();
+  }
+  if (e.key === 'ArrowRight' && !running) {
+    const p = USE_WORKERS ? runEpochAsync() : Promise.resolve(runEpochSync());
+    p.then(() => { takeSnapshot(); render(); updateStats(); updateRewindUI(); });
+  }
+  if (e.key === 'e' || e.key === 'E') {
+    document.getElementById('btnEntropy').click();
+  }
+  if (e.key === 'r' || e.key === 'R') {
+    document.getElementById('btnReset').click();
+  }
+  if (e.key === 'v' || e.key === 'V') {
+    navigator.clipboard?.readText().then(text => {
+      if (!text.startsWith('alife:')) { showToast('No alife program in clipboard'); return; }
+      try {
+        const bytes = Uint8Array.from(atob(text.slice(6)), c => c.charCodeAt(0));
+        if (bytes.length !== TAPE_SIZE) throw new Error();
+        enterPasteMode(bytes);
+        showToast('Loaded from clipboard — click a cell to paste');
+      } catch { showToast('Invalid clipboard data'); }
+    }).catch(() => showToast('Clipboard read denied'));
+  }
+});
+
+// ── Legend ────────────────────────────────────────────────────────────────────
+const legendEl = document.getElementById('legend');
+OPCODE_NAMES.forEach((name, i) => {
+  const [r, g, b] = PALETTE[i];
+  const div = document.createElement('div');
+  div.className = 'li';
+  div.innerHTML = `<div class="lc" style="background:rgb(${r},${g},${b})"></div><span>${name}</span>`;
+  legendEl.appendChild(div);
+});
+const dataDiv = document.createElement('div');
+dataDiv.className = 'li';
+dataDiv.innerHTML = `<div class="lc" style="background:#141414;border:1px solid #333"></div><span>data</span>`;
+legendEl.appendChild(dataDiv);
+
+// ── Shortcut hint ─────────────────────────────────────────────────────────────
+if (!isEmbed) {
+  const hint = document.createElement('div');
+  hint.style.cssText = 'font-size:10px;color:#333;margin-top:4px;text-align:center;';
+  hint.textContent = 'Space=pause  →=step  E=entropy  R=reset  click=pin  dblclick=edit  V=paste from clipboard';
+  document.getElementById('legend').after(hint);
+}
+
+// ── Kick off ──────────────────────────────────────────────────────────────────
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('unload', teardownWorkers);
+readHash();
+init();
+
+// Show worker/GL status in console for diagnostics
+console.log(`[alife] crossOriginIsolated=${crossOriginIsolated} USE_WORKERS=${USE_WORKERS} workers=${NUM_WORKERS} USE_GL=${USE_GL}`);
+
+})();
+</script>
+</body>
+</html>
