@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101613">
+  <title>Particle soup · Artificial life</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      background: #101613;
+      color: #e5eee7;
+      font: 16px Inter, system-ui, sans-serif;
+      --muted: #a4b7ab;
+      --line: #34463c;
+      --accent: #c0dfae;
+      --trail: #87b796;
+      --carrier: #f7bc76;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { margin: 0 auto; max-width: 1180px; padding: clamp(16px, 3vw, 36px); }
+    header { margin-bottom: 20px; }
+    header a { color: var(--muted); font-size: .875rem; text-underline-offset: .3em; }
+    header a:hover { color: var(--accent); }
+    h1 { margin: 6px 0 0; font-size: clamp(1.7rem, 4vw, 2.65rem); letter-spacing: -.046em; font-weight: 650; }
+    form {
+      display: grid;
+      grid-template-columns: minmax(140px, 1.2fr) minmax(142px, 1fr) repeat(3, minmax(88px, .72fr)) auto;
+      align-items: end;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: .8rem; }
+    select, input, button {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #19231d;
+      color: inherit;
+      padding: 0 10px;
+      font: inherit;
+      font-size: .9rem;
+    }
+    select, input { width: 100%; min-width: 0; }
+    select, button { cursor: pointer; }
+    button { color: #e5eee7; }
+    button:hover { border-color: var(--accent); }
+    button:disabled { cursor: default; opacity: .5; }
+    .actions { display: flex; gap: 8px; }
+    .actions button { flex: 1; }
+    #play { background: var(--accent); color: #18271c; border-color: var(--accent); min-width: 76px; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .world { background: #090f0c; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    canvas { display: block; width: 100%; height: auto; }
+    .readout {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px 22px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .metrics { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 18px; }
+    .metric { display: flex; align-items: baseline; gap: 7px; color: var(--muted); font-size: .86rem; }
+    .metric strong {
+      color: #e5eee7;
+      font: 500 .9rem "IBM Plex Mono", ui-monospace, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    .key::before { content: ""; display: inline-block; margin-right: 5px; vertical-align: .13em; }
+    .trail::before { width: 12px; height: 2px; background: var(--trail); }
+    .carriers::before { width: 6px; height: 6px; border-radius: 50%; background: var(--carrier); }
+    #result { margin: 0; color: var(--accent); font-size: .86rem; }
+    details { margin-top: 14px; max-width: 74ch; color: var(--muted); font-size: .87rem; line-height: 1.6; }
+    summary { color: #d0dfd4; cursor: pointer; }
+    details p { margin: .6em 0 0; }
+    code { color: var(--carrier); overflow-wrap: anywhere; }
+    @media (max-width: 850px) {
+      form { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+      .actions { grid-column: 1 / -1; }
+    }
+    @media (pointer: coarse) {
+      select, input, button { min-height: 44px; font-size: 1rem; }
+    }
+  </style>
+  <script src="../bff.js" defer></script>
+  <script src="./soup.js" defer></script>
+  <script src="./worker.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <a href="../index.html">Grid soup</a>
+      <h1>Particle soup</h1>
+    </header>
+
+    <form id="controls">
+      <label>Movement
+        <select id="movement">
+          <option value="trail">Follow trails</option>
+          <option value="drift">Free drift</option>
+          <option value="heritable">Heritable attraction</option>
+        </select>
+      </label>
+      <label>Starting tapes
+        <select id="start">
+          <option value="random">Random tapes</option>
+          <option value="known">Known replicator</option>
+        </select>
+      </label>
+      <label>Seed
+        <input id="seed" type="number" min="0" max="4294967295" step="1" inputmode="numeric" required>
+      </label>
+      <label>Mutation
+        <select id="mutation">
+          <option value="normal">0.024%</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+      <label>Speed
+        <select id="speed">
+          <option value="normal">Normal</option>
+          <option value="fast">4×</option>
+          <option value="turbo">Turbo</option>
+        </select>
+      </label>
+      <div class="actions">
+        <button id="restart" type="submit">Restart</button>
+        <button id="play" type="button">Pause</button>
+      </div>
+    </form>
+
+    <div class="world">
+      <canvas id="soup" width="1024" height="592" role="img" aria-label="Moving BFF tape carriers and their fading chemical trails. Gold marks carriers of a verified replicator.">
+        Your browser needs Canvas to show the particle simulation.
+      </canvas>
+    </div>
+
+    <div class="readout">
+      <div class="metrics">
+        <span class="metric key trail">Chemical trail</span>
+        <span class="metric key carriers">Matching tapes <strong id="carriers">0</strong></span>
+        <span class="metric">Encounters <strong id="encounters">0</strong></span>
+      </div>
+      <p id="result" role="status">Starting simulation</p>
+    </div>
+
+    <details id="program-detail" hidden>
+      <summary>Verified pattern</summary>
+      <p><code id="program"></code></p>
+    </details>
+    <details>
+      <summary>How replication is detected</summary>
+      <p>Each particle carries a 64-byte program. Nearby particles join and run their tapes, then keep the rewritten halves. After a large copying event the detector runs independent five-generation trials with fresh random partners. Gold marks tapes matching the verified byte pattern.</p>
+      <p>Movement, starting tapes, and mutation changes restart the same seed. In Heritable attraction, the last tape byte sets the strength of each turn toward a trail.</p>
+    </details>
+  </main>
+</body>
+</html>
