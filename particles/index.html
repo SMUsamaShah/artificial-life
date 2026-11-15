@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#eee9dd">
+  <title>Particle origins · Artificial life</title>
+  <style>
+    :root {
+      color-scheme: light;
+      background: #eee9dd;
+      color: #1e2d25;
+      font: 16px "Instrument Sans", system-ui, sans-serif;
+      --muted: #54635a;
+      --line: #c3c8bb;
+      --accent: #235e51;
+      --scene: #f3f4e9;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1100px; margin: auto; padding: clamp(15px, 3vw, 30px); }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 15px; }
+    header a { font-size: .8rem; color: var(--accent); text-underline-offset: .23em; white-space: nowrap; }
+    h1 { font-weight: 650; line-height: 1; margin: 0; font-size: clamp(2rem, 5vw, 3.25rem); letter-spacing: -.055em; }
+    .toolbar, .replays, .transport { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+    .toolbar { justify-content: space-between; margin-bottom: 10px; }
+    button, select, input {
+      min-height: 40px;
+      border: 1px solid #aeb9aa;
+      border-radius: 5px;
+      background: #f8f5eb;
+      color: inherit;
+      padding: 0 10px;
+      font: inherit;
+      font-size: .87rem;
+    }
+    button, select, summary { cursor: pointer; }
+    button:hover, select:hover { border-color: var(--accent); }
+    button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+    #play { min-width: 64px; }
+    :focus-visible { outline: 2px solid #2d7463; outline-offset: 2px; }
+    .scene {
+      overflow: hidden;
+      border: 1px solid #aeb9aa;
+      border-radius: 7px;
+      background: var(--scene);
+      aspect-ratio: 25 / 18;
+    }
+    canvas { display: block; width: 100%; height: 100%; }
+    .readout {
+      min-height: 52px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 7px 14px;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .readout p { margin: 0; }
+    #status { font-size: .88rem; color: #2a4739; }
+    #counts { color: var(--muted); font: .79rem "IBM Plex Mono", ui-monospace, monospace; }
+    .footer { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px 25px; padding-top: 12px; }
+    form { display: flex; align-items: center; gap: 8px; }
+    form label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: .82rem; }
+    input { width: 7.3rem; }
+    details { max-width: 69ch; font-size: .85rem; color: var(--muted); line-height: 1.55; }
+    details summary { color: var(--accent); }
+    details p { margin: .55em 0; }
+    @media (max-width: 550px) {
+      .toolbar { gap: 8px; }
+      .replays { width: 100%; }
+      .replays button { flex: 1 1 auto; padding: 0 7px; }
+      .scene { aspect-ratio: 1.14; }
+      .readout { align-items: start; flex-direction: column; padding: 8px 0; }
+      .footer { gap: 10px 16px; }
+    }
+    @media (pointer: coarse) {
+      button, select, input { min-height: 44px; }
+      input { font-size: 1rem; }
+    }
+  </style>
+  <script src="./engine.js" defer></script>
+  <script src="./observe.js" defer></script>
+  <script src="./worker.js" defer></script>
+  <script src="./replay.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Particle origins</h1>
+      <a href="../index.html">Grid soup</a>
+    </header>
+    <div class="toolbar">
+      <div class="replays" role="group" aria-label="Trace a lineage">
+        <button type="button" id="origin" aria-pressed="false">Assembly</button>
+        <button type="button" id="first" aria-pressed="false">First division</button>
+        <button type="button" id="daughter" aria-pressed="false">Daughter divides</button>
+      </div>
+      <div class="transport">
+        <button type="button" id="field" aria-pressed="false">Whole field</button>
+        <label>
+          <select id="speed" aria-label="Playback speed">
+            <option value="30">1×</option>
+            <option value="90">3×</option>
+            <option value="360">12×</option>
+          </select>
+        </label>
+        <button type="button" id="play">Pause</button>
+      </div>
+    </div>
+    <div class="scene">
+      <canvas id="world" role="img" aria-label="Moving particles assembling into rotating rings, with tracked groups colored for the lineage replay">
+        This experiment uses Canvas to display particle positions.
+      </canvas>
+    </div>
+    <div class="readout">
+      <p id="status" role="status">Starting from a random scatter</p>
+      <p id="counts">Step 0</p>
+    </div>
+    <div class="footer">
+      <form id="seeds">
+        <label>Random seed
+          <input type="number" id="seed" min="0" max="4294967295" step="1" inputmode="numeric" required>
+        </label>
+        <button type="submit">Restart</button>
+      </form>
+      <details>
+        <summary>Rule and verification</summary>
+        <p>Each of 3,600 particles counts its nearby neighbors on the left and right, turns, then moves forward. The same rule runs from randomly scattered positions and headings at every step.</p>
+        <p>The observer tracks groups by shared particle IDs. It records a division once both daughters persist and their tracked particles remain beyond sensing range. Replays advance the same random start to the selected step.</p>
+      </details>
+    </div>
+  </main>
+</body>
+</html>
