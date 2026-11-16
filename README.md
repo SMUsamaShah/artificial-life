@@ -14,6 +14,10 @@ In **seed 69**, a 13-particle group is first tracked at step 8. It grows, elonga
 
 The observer runs separately from the motion law. It follows groups using shared particle IDs and confirms a division after both daughters persist for at least 72 steps and their tracked cores are observed beyond sensing range at consecutive samples spanning at least 16 steps. Replay buttons fast-forward from the same random start and use color to trace the groups. Other seeds can be run from the field view.
 
+The world controls offer **Classic**, **Two speeds**, and **Chase & evade**. Two speeds mixes particles that travel 0.60 and 0.77 units per step. In Chase & evade, one type steers toward nearby particles of the other type, and the other steers away. **Scatter**, **Bands**, and **Two clouds** sample different initial spatial distributions. The observer found stable divisions with both two-type rules on random-scatter runs. For repeatable examples, try Two speeds with seed 69 and Chase & evade with seed 17. The lineage replays use Classic and Scatter.
+
+Choose **Uncapped** to keep the simulation running independently of the display. The worker queues computation back-to-back and handles pause and snapshot requests between batches. Steps per second are measured from the rendered snapshots. A replay pauses at the end of its clip, and Play continues from there.
+
 Run the deterministic check with `node --test tests/particle-origins.test.cjs`.
 
 ## Program description

@@ -45,6 +45,7 @@
       border-radius: 7px;
       background: var(--scene);
       aspect-ratio: 25 / 18;
+      max-height: 70vh;
     }
     canvas { display: block; width: 100%; height: 100%; }
     .readout {
@@ -60,11 +61,16 @@
     .readout p { margin: 0; }
     #status { font-size: .88rem; color: #2a4739; }
     #counts { color: var(--muted); font: .79rem "IBM Plex Mono", ui-monospace, monospace; }
-    .footer { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px 25px; padding-top: 12px; }
-    form { display: flex; align-items: center; gap: 8px; }
-    form label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: .82rem; }
+    #seeds { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin-bottom: 10px; }
+    #seeds label { display: grid; gap: 4px; color: var(--muted); font-size: .8rem; }
+    #kinds { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: .78rem; }
+    #kinds[hidden] { display: none; }
+    #kinds span::before {
+      content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px;
+      border-radius: 50%; background: var(--swatch); vertical-align: .08em;
+    }
     input { width: 7.3rem; }
-    details { max-width: 69ch; font-size: .85rem; color: var(--muted); line-height: 1.55; }
+    details { max-width: 69ch; margin-top: 12px; font-size: .85rem; color: var(--muted); line-height: 1.55; }
     details summary { color: var(--accent); }
     details p { margin: .55em 0; }
     @media (max-width: 550px) {
@@ -73,7 +79,9 @@
       .replays button { flex: 1 1 auto; padding: 0 7px; }
       .scene { aspect-ratio: 1.14; }
       .readout { align-items: start; flex-direction: column; padding: 8px 0; }
-      .footer { gap: 10px 16px; }
+      #seeds label { flex: 1 1 calc(50% - 8px); }
+      #seeds input, #seeds select { width: 100%; }
+      #seeds button { flex: 1 1 calc(50% - 8px); }
     }
     @media (pointer: coarse) {
       button, select, input { min-height: 44px; }
@@ -105,33 +113,48 @@
             <option value="30">1×</option>
             <option value="90">3×</option>
             <option value="360">12×</option>
+            <option value="uncapped">Uncapped</option>
           </select>
         </label>
         <button type="button" id="play">Pause</button>
       </div>
     </div>
+    <form id="seeds">
+      <label>Behaviour
+        <select id="model">
+          <option value="classic">Classic</option>
+          <option value="speeds">Two speeds</option>
+          <option value="pursuit">Chase &amp; evade</option>
+        </select>
+      </label>
+      <label>Arrangement
+        <select id="arrangement">
+          <option value="scatter">Scatter</option>
+          <option value="bands">Bands</option>
+          <option value="clouds">Two clouds</option>
+        </select>
+      </label>
+      <label>Random seed
+        <input type="number" id="seed" min="0" max="4294967295" step="1" inputmode="numeric" required>
+      </label>
+      <button type="submit">Restart</button>
+    </form>
     <div class="scene">
-      <canvas id="world" role="img" aria-label="Moving particles assembling into rotating rings, with tracked groups colored for the lineage replay">
+      <canvas id="world" role="img" aria-label="Moving particles coloured by type, density, or their tracked group">
         This experiment uses Canvas to display particle positions.
       </canvas>
     </div>
     <div class="readout">
       <p id="status" role="status">Starting from a random scatter</p>
+      <div id="kinds" hidden aria-label="Particle types"></div>
       <p id="counts">Step 0</p>
     </div>
-    <div class="footer">
-      <form id="seeds">
-        <label>Random seed
-          <input type="number" id="seed" min="0" max="4294967295" step="1" inputmode="numeric" required>
-        </label>
-        <button type="submit">Restart</button>
-      </form>
-      <details>
-        <summary>Rule and verification</summary>
-        <p>Each of 3,600 particles counts its nearby neighbors on the left and right, turns, then moves forward. The same rule runs from randomly scattered positions and headings at every step.</p>
-        <p>The observer tracks groups by shared particle IDs. It records a division once both daughters persist and their tracked particles remain beyond sensing range. Replays advance the same random start to the selected step.</p>
-      </details>
-    </div>
+    <details>
+      <summary>Rules and verification</summary>
+      <p>Each particle counts neighbours on the left and right, then turns and moves. Two speeds mixes slow and fast particles. In Chase &amp; evade, each type also steers towards or away from nearby particles of the other type.</p>
+      <p>Behaviour and arrangement restart the chosen seed. Lineage replays use Classic and Scatter. The observer tracks divisions by following particle IDs and checking whether the daughters persist apart.</p>
+      <p>Uncapped runs the simulation continuously and samples the results for display. Replay clips pause at the end of their recorded interval.</p>
+    </details>
   </main>
 </body>
 </html>

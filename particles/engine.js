@@ -4,7 +4,12 @@
   const WIDTH = 250;
   const HEIGHT = 180;
   const RADIUS = 5;
-  const SPEED = 0.67;
+  const MODELS = {
+    classic: { speeds: [0.67], steering: [0], types: [] },
+    speeds: { speeds: [0.60, 0.77], steering: [0, 0], types: ['Slow', 'Fast'] },
+    pursuit: { speeds: [0.67, 0.67], steering: [0.32, -0.26], types: ['Followers', 'Evaders'] },
+  };
+  const ARRANGEMENTS = ['scatter', 'bands', 'clouds'];
   const COUNT = WIDTH * HEIGHT * 0.08;
   const COLS = WIDTH / RADIUS;
   const ROWS = HEIGHT / RADIUS;
@@ -55,9 +60,13 @@
   }
 
   class World {
-    constructor(seed) {
+    constructor(seed, model = 'classic', arrangement = 'scatter') {
       this.tick = 0;
       this.random = randomStream(seed);
+      const { speeds, steering } = MODELS[model];
+      this.speeds = speeds;
+      this.steering = steering;
+      this.kind = new Uint8Array(COUNT);
       this.x = new Float64Array(COUNT);
       this.y = new Float64Array(COUNT);
       this.vx = new Float64Array(COUNT);
@@ -68,9 +77,20 @@
       this.prev = new Int16Array(COUNT).fill(-1);
       this.order = new Uint16Array(COUNT);
       for (let id = 0; id < COUNT; id++) {
-        const x = this.random() * WIDTH;
-        const y = this.random() * HEIGHT;
+        const horizontal = this.random();
+        const vertical = this.random();
+        let x = horizontal * WIDTH;
+        let y = vertical * HEIGHT;
+        if (arrangement === 'bands' && id % 3 !== 0) {
+          y = (id % 3 === 1 ? 0.08 : 0.55) * HEIGHT + vertical * 0.37 * HEIGHT;
+        } else if (arrangement === 'clouds' && id % 4 !== 0) {
+          const radius = Math.sqrt(horizontal);
+          const bearing = vertical * 2 * Math.PI;
+          x = ((id & 4 ? 0.75 : 0.25) + 0.23 * radius * Math.cos(bearing)) * WIDTH;
+          y = (0.5 + 0.43 * radius * Math.sin(bearing)) * HEIGHT;
+        }
         const angle = this.random() * 2 * Math.PI;
+        this.kind[id] = id % speeds.length;
         this.x[id] = x;
         this.y[id] = y;
         this.vx[id] = Math.cos(angle);
@@ -112,7 +132,7 @@
     }
 
     step() {
-      const { x, y, vx, vy, order, head, next, random } = this;
+      const { x, y, vx, vy, order, head, next, random, kind, speeds, steering } = this;
       for (let i = order.length - 1; i > 0; i--) {
         const j = (random() * (i + 1)) | 0;
         const id = order[i];
@@ -127,8 +147,13 @@
         const headingY = vy[id];
         const cell = bin(originX, originY);
         const start = cell * 9;
+        const species = kind[id];
+        const bias = steering[species];
         let left = 0;
         let right = 0;
+        let otherX = 0;
+        let otherY = 0;
+        let otherCount = 0;
         for (let k = start; k < start + 9; k++) {
           for (let other = head[offsets[k]]; other >= 0; other = next[other]) {
             if (other === id) continue;
@@ -137,18 +162,32 @@
             if (dx * dx + dy * dy > RADIUS * RADIUS) continue;
             if (headingX * dy - headingY * dx > 0) right++;
             else left++;
+            if (bias !== 0 && kind[other] !== species) {
+              otherX += dx;
+              otherY += dy;
+              otherCount++;
+            }
           }
         }
         const count = left + right;
         this.density[id] = count;
         // A fixed turn plus 17 degrees per neighbor, toward the busier side.
         const turn = COUNT + count * Math.sign(right - left);
-        const dx = headingX * turnX[turn] - headingY * turnY[turn];
-        const dy = headingX * turnY[turn] + headingY * turnX[turn];
+        let dx = headingX * turnX[turn] - headingY * turnY[turn];
+        let dy = headingX * turnY[turn] + headingY * turnX[turn];
+        if (otherCount) {
+          // A small directional bias from the centroid of nearby unlike particles.
+          const influence = bias / (RADIUS * otherCount);
+          dx += influence * otherX;
+          dy += influence * otherY;
+          const magnitude = Math.sqrt(dx * dx + dy * dy);
+          dx /= magnitude;
+          dy /= magnitude;
+        }
         vx[id] = dx;
         vy[id] = dy;
-        x[id] = wrap(originX + SPEED * dx, WIDTH);
-        y[id] = wrap(originY + SPEED * dy, HEIGHT);
+        x[id] = wrap(originX + speeds[species] * dx, WIDTH);
+        y[id] = wrap(originY + speeds[species] * dy, HEIGHT);
         const destination = bin(x[id], y[id]);
         if (destination !== cell) {
           this.remove(id, cell);
@@ -159,5 +198,5 @@
     }
   }
 
-  globalThis.ParticleWorld = { World, WIDTH, HEIGHT, COUNT, RADIUS, wrap, shortest };
+  globalThis.ParticleWorld = { World, WIDTH, HEIGHT, COUNT, RADIUS, MODELS, ARRANGEMENTS, wrap, shortest };
 })();
